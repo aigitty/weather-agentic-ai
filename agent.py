@@ -1,6 +1,7 @@
 import requests
 import os
 from dotenv import load_dotenv
+from datetime import datetime, timezone
 
 # Load environment variables
 load_dotenv()
@@ -21,12 +22,35 @@ def get_weather(latitude: float, longitude: float):
 
     if response.status_code == 200:
         data = response.json()
-        return data["current_weather"]
+        return data["current_weather"], data
     else:
-        return {"error": f"Failed to fetch weather. Status code: {response.status_code}"}
+        return None, {"error": f"Failed to fetch weather. Status code: {response.status_code}"}
 
 
 if __name__ == "__main__":
     # Example: Bangalore
-    weather = get_weather(12.9716, 77.5946)
-    print("Current weather:", weather)
+    lat, lon = 12.9716, 77.5946
+    current, raw = get_weather(lat, lon)
+    if current:
+        print("Current weather:", current)
+        # build event structure
+        event = {
+            "region": "Bengaluru",
+            "source": "open-meteo",
+            "ts": current.get("time") or datetime.now(timezone.utc).isoformat(),
+            "temp_c": current.get("temperature"),
+            "wind_kph": current.get("windspeed"),
+            "precip_mm": None,   # Open-Meteo current_weather may not include precip in same object
+            "conditions": current.get("weathercode"),
+            "raw": raw
+        }
+
+        # Insert into Postgres
+        try:
+            from db import insert_weather
+            new_id = insert_weather(event)
+            print(f"Inserted weather event id={new_id}")
+        except Exception as e:
+            print("DB insert failed:", e)
+    else:
+        print("Failed to fetch weather:", raw)
