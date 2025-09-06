@@ -1,4 +1,6 @@
 requests
 python-dotenv
 psycopg2-binary==2.9.7
+fastapi==0.100.0
+uvicorn==0.22.0
 
