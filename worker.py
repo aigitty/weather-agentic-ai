@@ -1,141 +1,143 @@
-# worker.py (updated - robust handling of get_weather return types)
-import time
-import traceback
 import os
+import asyncio
+import logging
+import json
+import time
+import requests
+import psycopg2
+from psycopg2.extras import Json
+from sentence_transformers import SentenceTransformer
+import torch
+from datetime import datetime, timezone
 from dotenv import load_dotenv
 
+# Load env variables
 load_dotenv()
 
-# local imports (your existing helpers)
-import db_tasks
-from agent import get_weather     # flexible: may return dict or (current, raw) tuple
-from db import insert_weather     # insert_weather(event_dict) -> id
+AGENT_ENDPOINT = os.getenv("AGENT_ENDPOINT", "http://localhost:8000")
+DEFAULT_LOCATION = os.getenv("DEFAULT_LOCATION", "Bangalore")
+AUTO_FETCH_INTERVAL = int(os.getenv("AUTO_FETCH_INTERVAL", "3600"))
 
-SLEEP_SECONDS = float(os.getenv("WORKER_POLL_INTERVAL", 5))
+# DB config
+DB_USER = os.getenv("POSTGRES_USER")
+DB_PASS = os.getenv("POSTGRES_PASSWORD")
+DB_NAME = os.getenv("POSTGRES_DB")
+DB_PORT = os.getenv("POSTGRES_PORT", "5432")
 
-def extract_current_and_raw(got):
-    """
-    Accepts multiple shapes from get_weather:
-      - None -> (None, None)
-      - dict with 'current_weather' -> (current_weather dict, full dict)
-      - dict that is already current_weather -> (dict, None)
-      - tuple/list (current, raw) -> unpack
-    """
-    if got is None:
-        return None, None
-    # tuple/list
-    if isinstance(got, (tuple, list)) and len(got) >= 1:
-        # unpack first two elements if present
-        current = got[0]
-        raw = got[1] if len(got) > 1 else None
-        return current, raw
-    # dict
-    if isinstance(got, dict):
-        if "error" in got:
-            return got, None
-        if "current_weather" in got:
-            return got["current_weather"], got
-        # might already be the current_weather shape
-        return got, None
-    # unknown
-    return None, None
+# Logging
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s [%(levelname)s] %(message)s",
+)
 
-def handle_task(task):
-    tid = task["id"]
-    ttype = task["type"]
-    payload = task.get("payload") or {}
-    try:
-        if ttype in ("fetch_weather", "weather"):
-            lat = None
-            lon = None
+# Embedding model
+device = "cuda" if torch.cuda.is_available() else "cpu"
+embedding_model = SentenceTransformer("sentence-transformers/all-mpnet-base-v2", device=device)
+logging.info(f"🔧 Using embedding model on {device}")
 
-            # direct lat/lon keys
-            if isinstance(payload, dict) and "lat" in payload and "lon" in payload:
-                lat = float(payload["lat"]); lon = float(payload["lon"])
-            else:
-                # nested payload forms
-                inp = None
-                if isinstance(payload, dict):
-                    # payload may be {'input': {...}}
-                    inp = payload.get("input") or payload.get("payload") or None
-                if inp and isinstance(inp, dict):
-                    if "lat" in inp and "lon" in inp:
-                        lat = float(inp["lat"]); lon = float(inp["lon"])
-                    elif "location" in inp:
-                        loc = str(inp["location"]).lower()
-                        if "bangalore" in loc or "bengaluru" in loc:
-                            lat, lon = 12.9716, 77.5946
+# Database connection
+conn = psycopg2.connect(
+    dbname=DB_NAME,
+    user=DB_USER,
+    password=DB_PASS,
+    host="localhost",
+    port=DB_PORT
+)
+cur = conn.cursor()
 
-            if lat is None or lon is None:
-                db_tasks.fail_task(tid, "missing lat/lon in payload")
-                print(f"[task {tid}] failed: missing lat/lon")
-                return
+# =============== Helper Functions ===============
 
-            # call fetcher
-            got = get_weather(lat, lon)
-            current, raw = extract_current_and_raw(got)
+def insert_weather_event(region, source, ts, temp, wind, cond):
+    cur.execute(
+        """
+        INSERT INTO weather_events (region, source, ts, temp_c, wind_kph, conditions, created_at)
+        VALUES (%s, %s, %s, %s, %s, %s, %s)
+        RETURNING id;
+        """,
+        (region, source, ts, temp, wind, cond, datetime.now(timezone.utc)),
+    )
+    event_id = cur.fetchone()[0]
+    conn.commit()
+    logging.info(f"🌦️ Stored weather_event id={event_id}")
+    return event_id
 
-            # detect error-shaped response
-            if isinstance(current, dict) and "error" in current:
-                db_tasks.fail_task(tid, f"weather fetch error: {current.get('error')}")
-                print(f"[task {tid}] weather fetch error: {current.get('error')}")
-                return
-            if current is None:
-                db_tasks.fail_task(tid, "weather fetch returned no data")
-                print(f"[task {tid}] weather fetch returned no data")
-                return
+def embed_weather_event(event_id, text):
+    emb = embedding_model.encode([text])[0]
+    cur.execute(
+        """
+        INSERT INTO weather_event_embeddings (weather_event_id, model, vector, metadata)
+        VALUES (%s, %s, %s, %s)
+        RETURNING id;
+        """,
+        (event_id, "sentence-transformers/all-mpnet-base-v2", emb.tolist(), Json({"text": text})),
+    )
+    emb_id = cur.fetchone()[0]
+    conn.commit()
+    logging.info(f"🧩 Created embedding id={emb_id} for weather_event={event_id}")
 
-            # Build event dict
-            event = {
-                "region": f"{lat},{lon}",
-                "source": "open-meteo",
-                "ts": current.get("time") if isinstance(current, dict) else None,
-                "temp_c": current.get("temperature") if isinstance(current, dict) else None,
-                "wind_kph": current.get("windspeed") if isinstance(current, dict) else None,
-                "precip_mm": None,
-                "conditions": current.get("weathercode") if isinstance(current, dict) else None,
-                "raw": raw or {}
-            }
+def fetch_weather_from_api(location: str):
+    lat, lon = 12.9716, 77.5946 if location.lower() == "bangalore" else (0, 0)
+    url = f"{os.getenv('OPEN_METEO_URL')}?latitude={lat}&longitude={lon}&current_weather=true"
+    res = requests.get(url).json()
+    current = res.get("current_weather", {})
+    return {
+        "region": f"{lat},{lon}",
+        "source": "open-meteo",
+        "ts": current.get("time"),
+        "temp_c": current.get("temperature"),
+        "wind_kph": current.get("windspeed"),
+        "conditions": str(current.get("weathercode"))
+    }
 
-            event_id = insert_weather(event)
+# =============== Async Worker Loops ===============
 
-            # Insert a dummy embedding for now (safe placeholder)
-            try:
-                dummy_vector = [0.0] * 8
-                db_tasks.insert_embedding(object_type="weather_event", object_id=str(event_id),
-                                          model="dummy", vector=dummy_vector, metadata={"lat": lat, "lon": lon})
-            except Exception:
-                print("[warn] embedding insert failed (non-fatal)")
-
-            result = {"status": "ok", "event_id": event_id}
-            db_tasks.complete_task(tid, result)
-            print(f"[task {tid}] completed -> event {event_id}")
-
-        else:
-            db_tasks.fail_task(tid, f"unknown task type: {ttype}")
-            print(f"[task {tid}] unknown task type: {ttype}")
-
-    except Exception as e:
-        traceback.print_exc()
-        db_tasks.fail_task(tid, f"exception: {e}")
-        print(f"[task {tid}] exception: {e}")
-
-def run_worker():
-    print("Worker started. Polling for tasks...")
+async def task_poll_loop():
+    """Polls for A2A tasks and processes them."""
     while True:
         try:
-            task = db_tasks.fetch_and_claim_next_task(worker_name="worker-1")
-            if task:
-                print("Claimed task:", task["id"], task["type"])
-                handle_task(task)
-            else:
-                time.sleep(SLEEP_SECONDS)
-        except KeyboardInterrupt:
-            print("Worker shutting down (KeyboardInterrupt)")
-            break
+            resp = requests.get(f"{AGENT_ENDPOINT}/a2a/tasks/poll?worker=worker-1")
+            task = resp.json().get("task")
+            if not task:
+                await asyncio.sleep(5)
+                continue
+
+            logging.info(f"📥 Claimed task: {task['id']} {task['type']}")
+            if task["type"] == "fetch_weather":
+                weather = fetch_weather_from_api(task["payload"]["input"]["location"])
+                event_id = insert_weather_event(**weather)
+                text = f"Weather in region {weather['region']} at {weather['ts']}: temperature {weather['temp_c']}°C, wind {weather['wind_kph']} kph, conditions {weather['conditions']}"
+                embed_weather_event(event_id, text)
+
+                # mark complete
+                requests.post(
+                    f"{AGENT_ENDPOINT}/a2a/tasks/{task['id']}/complete",
+                    json={"status": "completed", "result": {"event_id": event_id}},
+                )
+                logging.info(f"✅ Task {task['id']} completed -> event {event_id}")
+
         except Exception as e:
-            print("Worker loop error:", e)
-            time.sleep(SLEEP_SECONDS)
+            logging.error(f"❌ Error in task loop: {e}")
+            await asyncio.sleep(5)
+
+async def auto_fetch_loop():
+    """Periodically fetches + embeds weather without external trigger."""
+    while True:
+        try:
+            weather = fetch_weather_from_api(DEFAULT_LOCATION)
+            event_id = insert_weather_event(**weather)
+            text = f"Weather in region {weather['region']} at {weather['ts']}: temperature {weather['temp_c']}°C, wind {weather['wind_kph']} kph, conditions {weather['conditions']}"
+            embed_weather_event(event_id, text)
+            logging.info(f"🔁 Auto-fetch + embed done for {DEFAULT_LOCATION}")
+        except Exception as e:
+            logging.error(f"❌ Error in auto-fetch loop: {e}")
+
+        await asyncio.sleep(AUTO_FETCH_INTERVAL)
+
+# =============== Entry Point ===============
+
+async def main():
+    logging.info("🚀 Worker started: A2A polling + Auto-fetch loop enabled")
+    await asyncio.gather(task_poll_loop(), auto_fetch_loop())
 
 if __name__ == "__main__":
-    run_worker()
+    asyncio.run(main())
