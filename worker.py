@@ -6,15 +6,13 @@ import asyncio
 import logging
 from datetime import datetime, timezone
 from typing import Dict, Any, Optional
-
+import uuid
 import requests
 import psycopg2
 import psycopg2.extras
 from dotenv import load_dotenv
-
 from sentence_transformers import SentenceTransformer
 import torch
-
 from prometheus_client import Counter, Gauge, start_http_server
 from pythonjsonlogger import jsonlogger
 
@@ -38,6 +36,7 @@ DB_HOST = "localhost"
 
 OPEN_METEO_URL = os.getenv("OPEN_METEO_URL", "https://api.open-meteo.com/v1/forecast")
 AGENT_ENDPOINT = os.getenv("AGENT_ENDPOINT", "http://127.0.0.1:8000")
+SERVICE_URL = os.getenv("SERVICE_URL", AGENT_ENDPOINT)
 
 # ---------- Metrics (Prometheus) ----------
 WEATHER_FETCH_TOTAL = Counter("worker_weather_fetch_total", "Weather fetch attempts", ["region", "status"])
@@ -59,14 +58,21 @@ def insert_weather_event(region, source, ts, temp_c, wind_kph, conditions):
             """
             INSERT INTO weather_events (region, source, ts, temp_c, wind_kph, conditions, created_at)
             VALUES (%s,%s,%s,%s,%s,%s,NOW())
+            ON CONFLICT (region, ts) DO NOTHING
             RETURNING id;
             """,
             (region, source, ts, temp_c, wind_kph, conditions),
         )
-        eid = cur.fetchone()[0]
-        conn.commit()
-    logger.info({"event": "weather_event_inserted", "event_id": eid, "region": region})
-    return eid
+        row = cur.fetchone()
+        if row:
+            eid = row[0]
+            logger.info({"event": "weather_event_inserted", "event_id": eid, "region": region})
+            conn.commit()
+            return eid
+        else:
+            logger.info({"event": "weather_event_skipped", "reason": "duplicate", "region": region, "ts": ts})
+            return None
+
 
 def insert_weather_embedding(event_id: int, model: str, vec, text: str):
     with get_conn() as conn, conn.cursor() as cur:
@@ -74,14 +80,26 @@ def insert_weather_embedding(event_id: int, model: str, vec, text: str):
             """
             INSERT INTO weather_event_embeddings (weather_event_id, model, vector, metadata)
             VALUES (%s, %s, %s::vector, %s::jsonb)
+            ON CONFLICT (weather_event_id, model) DO NOTHING
             RETURNING id;
             """,
-            (event_id, model, "[" + ",".join(str(float(x)) for x in vec) + "]", json.dumps({"text": text})),
+            (
+                event_id,
+                model,
+                "[" + ",".join(str(float(x)) for x in vec) + "]",
+                json.dumps({"text": text}),
+            ),
         )
-        emb_id = cur.fetchone()[0]
-        conn.commit()
-    logger.info({"event": "embedding_inserted", "embedding_id": emb_id, "event_id": event_id})
-    return emb_id
+        row = cur.fetchone()
+        if row:
+            emb_id = row[0]
+            logger.info({"event": "embedding_inserted", "embedding_id": emb_id, "event_id": event_id})
+            conn.commit()
+            return emb_id
+        else:
+            logger.info({"event": "embedding_skipped", "reason": "duplicate", "event_id": event_id})
+            return None
+
 
 # ---------- Embedding model ----------
 device = "cuda" if torch.cuda.is_available() else "cpu"
@@ -89,7 +107,7 @@ logger.info(f"🔧 Using embedding model on {device}")
 embedding_model = SentenceTransformer("sentence-transformers/all-mpnet-base-v2", device=device)
 
 # ---------- Weather fetch ----------
-def fetch_current(lat: float, lon: float) -> Optional[Dict[str, Any]]:
+def fetch_current(lat: float, lon: float, headers: Optional[Dict[str, str]] = None) -> Optional[Dict[str, Any]]:
     params = {
         "latitude": lat,
         "longitude": lon,
@@ -98,10 +116,11 @@ def fetch_current(lat: float, lon: float) -> Optional[Dict[str, Any]]:
         "timezone": "Asia/Calcutta",
         "forecast_days": 1,
     }
-    r = requests.get(OPEN_METEO_URL, params=params, timeout=20)
+    r = requests.get(OPEN_METEO_URL, params=params, headers=headers, timeout=20)
     if r.status_code != 200:
         return None
     return r.json().get("current_weather")
+
 
 # ---------- A2A ----------
 async def poll_once():
@@ -125,34 +144,93 @@ async def poll_once():
 
 # ---------- Auto-fetch + embed ----------
 async def auto_fetch_loop():
-    # Bangalore
     region = "12.9716,77.5946"
     lat, lon = 12.9716, 77.5946
+
     while True:
         try:
-            current = fetch_current(lat, lon)
-            if not current:
+            # 🎯 Generate correlation ID
+            correlation_id = str(uuid.uuid4())[:8]
+
+            # 🔹 Log before calling /weather
+            logger.info({
+                "event": "weather_api_triggered",
+                "region": region,
+                "cid": correlation_id,
+                "action": "calling service /weather endpoint"
+            })
+
+            # 🔹 Call FastAPI service (not Open-Meteo directly)
+            headers = {"X-Correlation-ID": correlation_id, "Content-Type": "application/json"}
+            r = requests.post(
+                f"{SERVICE_URL}/weather",
+                headers=headers,
+                json={"latitude": lat, "longitude": lon},
+                timeout=20,
+            )
+
+            if r.status_code != 200:
                 WEATHER_FETCH_TOTAL.labels(region, "fail").inc()
-                logger.error({"event": "fetch_fail", "region": region})
+                logger.error({
+                    "event": "fetch_fail",
+                    "region": region,
+                    "cid": correlation_id,
+                    "status": r.status_code,
+                    "error": r.text,
+                })
+                eid = None
             else:
                 WEATHER_FETCH_TOTAL.labels(region, "ok").inc()
+                resp = r.json()
+                current = resp.get("current", {})
+                eid = resp.get("event_id")
+                logger.info({
+                    "event": "weather_event_received",
+                    "region": region,
+                    "cid": correlation_id,
+                    "event_id": eid,
+                    "current": current,
+                })
+
+            # 🔹 Only embed if event_id exists
+            if eid:
                 ts = current.get("time")
                 temp = current.get("temperature")
                 wind = current.get("windspeed")
                 cond = str(current.get("weathercode"))
-                eid = insert_weather_event(region, "open-meteo", ts, temp, wind, cond)
-
                 text = f"Weather in region {region} at {ts}: temperature {temp}°C, wind {wind} kph, conditions {cond}"
+
                 vec = embedding_model.encode([text], normalize_embeddings=True)[0]
                 emb_id = insert_weather_embedding(eid, "sentence-transformers/all-mpnet-base-v2", vec, text)
                 WEATHER_EMBED_TOTAL.labels("sentence-transformers/all-mpnet-base-v2").inc()
-                logger.info("🔁 Auto-fetch + embed done for Bangalore")
+
+                if emb_id:
+                    logger.info({
+                        "event": "embedding_inserted",
+                        "cid": correlation_id,
+                        "embedding_id": emb_id,
+                        "event_id": eid,
+                    })
+                else:
+                    logger.info({
+                        "event": "embedding_skipped",
+                        "cid": correlation_id,
+                        "region": region,
+                        "reason": "duplicate",
+                        "event_id": eid
+                    })
+
         except Exception as e:
             WORKER_LOOP_ERRORS_TOTAL.labels("auto_fetch").inc()
-            logger.exception({"event": "auto_fetch_error", "error": str(e)})
+            logger.exception({
+                "event": "auto_fetch_error",
+                "error": str(e),
+                "cid": correlation_id,
+            })
 
-        # sleep a bit (e.g., 5 minutes). For testing, use 60s.
+        # wait a bit (adjust as needed)
         await asyncio.sleep(60)
+
 
 async def main():
     # Expose worker metrics on :9000

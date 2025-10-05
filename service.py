@@ -5,15 +5,15 @@ import json
 import logging
 from datetime import datetime, timezone
 from typing import Optional, Dict, Any
-
+from fastapi import Request, HTTPException
 import psycopg2
 import psycopg2.extras
 import requests
 from fastapi import FastAPI, Request, Response, HTTPException
 from fastapi.responses import JSONResponse, PlainTextResponse
 from dotenv import load_dotenv
-
 from prometheus_client import Counter, Histogram, generate_latest, CONTENT_TYPE_LATEST
+
 
 # ---------- Logging: JSON to file ----------
 from pythonjsonlogger import jsonlogger
@@ -103,112 +103,187 @@ def create_task(body: Dict[str, Any]):
     required = {"requester", "type", "payload"}
     if not required.issubset(body):
         raise HTTPException(status_code=400, detail="Missing required fields")
+
+    priority = body.get("priority", 50)
+
     with get_conn() as conn, conn.cursor(cursor_factory=psycopg2.extras.DictCursor) as cur:
         cur.execute(
             """
-            INSERT INTO tasks (requester, type, payload, status, created_at)
-            VALUES (%s, %s, %s::jsonb, 'pending', NOW())
+            INSERT INTO tasks (requester, type, payload, state, priority, created_at)
+            VALUES (%s, %s, %s::jsonb, 'pending', %s, NOW())
             RETURNING id;
             """,
-            (body["requester"], body["type"], json.dumps(body["payload"])),
+            (body["requester"], body["type"], json.dumps(body["payload"]), priority),
         )
-        tid = cur.fetchone()[0]
+        task_id = cur.fetchone()[0]
         conn.commit()
+
     TASKS_CREATED.labels(body["type"]).inc()
-    logger.info({"event": "task_created", "task_id": tid, "type": body["type"]})
-    return {"task_id": tid}
+    logger.info({"event": "task_created", "task_id": task_id, "type": body["type"], "priority": priority})
+    return {"id": task_id, "state": "pending", "priority": priority}
 
-# ---------- A2A: poll ----------
+# ---------- A2A: claim next ----------
+@app.post("/a2a/tasks/next")
+def claim_next_task(body: Dict[str, Any] = None):
+    worker = (body or {}).get("worker", "default-worker")
+
+    with get_conn() as conn, conn.cursor(cursor_factory=psycopg2.extras.DictCursor) as cur:
+        cur.execute(
+            """
+            SELECT id, type, payload, priority
+            FROM tasks
+            WHERE state = 'pending'
+            ORDER BY priority DESC, created_at ASC
+            FOR UPDATE SKIP LOCKED
+            LIMIT 1;
+            """
+        )
+        row = cur.fetchone()
+        if not row:
+            return {"task": None}
+
+        task_info = {
+            "id": row["id"],
+            "type": row["type"],
+            "payload": row["payload"],
+            "priority": row["priority"],
+        }
+
+        cur.execute(
+            """
+            UPDATE tasks
+            SET state = 'in_progress', started_at = NOW()
+            WHERE id = %s;
+            """,
+            (row["id"],),
+        )
+        conn.commit()
+
+    TASKS_POLLED.labels(worker).inc()
+    logger.info(f"worker {worker} claimed task {task_info['id']}")
+    return {"task": task_info}
+
+# ---------- A2A: poll (GET alias for workers) ----------
 @app.get("/a2a/tasks/poll")
-def poll_task(worker: str):
-    with psycopg2.connect(
-        host="localhost",
-        user=os.getenv("POSTGRES_USER"),
-        password=os.getenv("POSTGRES_PASSWORD"),
-        dbname=os.getenv("POSTGRES_DB"),
-        port=os.getenv("POSTGRES_PORT", 5432)
-    ) as conn:
-        with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
-            cur.execute("""
-                SELECT id, requester, type, payload
-                FROM tasks
-                WHERE state = 'pending'
-                ORDER BY created_at
-                LIMIT 1
-            """)
-            task = cur.fetchone()
+def poll_task(worker: str = "default-worker"):
+    """Alias endpoint for worker polling; same logic as claim_next_task."""
+    with get_conn() as conn, conn.cursor(cursor_factory=psycopg2.extras.DictCursor) as cur:
+        cur.execute(
+            """
+            SELECT id, type, payload, priority
+            FROM tasks
+            WHERE state = 'pending'
+            ORDER BY priority DESC, created_at ASC
+            FOR UPDATE SKIP LOCKED
+            LIMIT 1;
+            """
+        )
+        row = cur.fetchone()
+        if not row:
+            return {"task": None}
 
-            if task:
-                cur.execute(
-                    "UPDATE tasks SET state='in_progress', worker=%s WHERE id=%s",
-                    (worker, task["id"])
-                )
-                conn.commit()
-                logging.info(f"🛠️ Worker {worker} claimed task {task['id']}")
-                return {"task": task}
-            else:
-                return {"task": None}
+        cur.execute(
+            "UPDATE tasks SET state='in_progress', started_at=NOW() WHERE id=%s;", (row["id"],)
+        )
+        conn.commit()
+
+    TASKS_POLLED.labels(worker).inc()
+    logger.info(f"worker {worker} polled and claimed task {row['id']}")
+    return {"task": dict(row)}
 
 
 # ---------- A2A: complete ----------
 @app.post("/a2a/tasks/{task_id}/complete")
 def complete_task(task_id: int, body: dict):
-    with psycopg2.connect(
-        host="localhost",
-        user=os.getenv("POSTGRES_USER"),
-        password=os.getenv("POSTGRES_PASSWORD"),
-        dbname=os.getenv("POSTGRES_DB"),
-        port=os.getenv("POSTGRES_PORT", 5432)
-    ) as conn:
-        with conn.cursor() as cur:
-            cur.execute(
-                "UPDATE tasks SET state='completed', result=%s, completed_at=NOW() WHERE id=%s",
-                (json.dumps(body), task_id)
-            )
-            conn.commit()
-            logging.info(f"✅ Task {task_id} marked as completed")
-            return {"status": "completed"}
+    result = body.get("result", {})
+    error = body.get("error")
+
+    new_state = "completed" if error is None else "failed"
+
+    with get_conn() as conn, conn.cursor() as cur:
+        cur.execute(
+            """
+            UPDATE tasks
+            SET state = %s,
+                result = %s::jsonb,
+                error  = %s,
+                finished_at = NOW()
+            WHERE id = %s;
+            """,
+            (new_state, json.dumps(result), error, task_id),
+        )
+        conn.commit()
+
+    if new_state == "completed":
+        TASKS_COMPLETED.inc()
+    logger.info(f"task {task_id} marked as {new_state}")
+    return {"status": new_state, "id": task_id}
 
 
 # ---------- Weather tool ----------
+
 @app.post("/weather")
-def weather(body: Dict[str, Any]):
+def weather(request: Request, body: Dict[str, Any]):
+    # 1) Read inputs + CID
     lat = body.get("latitude")
     lon = body.get("longitude")
     if lat is None or lon is None:
-        raise HTTPException(400, "latitude & longitude required")
+        raise HTTPException(status_code=400, detail="latitude & longitude required")
+
+    cid = request.headers.get("X-Correlation-ID", "none")
+    region = f"{lat},{lon}"
+
+    # 2) Build Open-Meteo request
     params = {
         "latitude": lat,
         "longitude": lon,
         "hourly": "temperature_2m,precipitation,precipitation_probability,windspeed_10m,cloudcover",
         "current_weather": "true",
-        "timezone": "Asia/Calcutta",
+        "timezone": "Asia/Kolkata",  # canonical IANA
         "forecast_days": 1,
     }
+
+    # 3) Log that we’re calling the upstream
+    logger.info({"event": "openmeteo_call", "cid": cid, "params": params})
+
+    # 4) Call Open-Meteo
     r = requests.get(OPEN_METEO_URL, params=params, timeout=20)
     if r.status_code != 200:
-        raise HTTPException(502, f"Upstream error {r.status_code}")
-    WEATHER_CALLS.labels("open-meteo").inc()
+        raise HTTPException(status_code=502, detail=f"Upstream error {r.status_code}")
+
     data = r.json()
-    current = data.get("current_weather", {})
-    region = f"{lat},{lon}"
+
+    # 5) Normalize a "current" payload
+    #    Prefer "current_weather" (Open-Meteo’s field), fallback to "current" if your code already constructs it.
+    current = data.get("current_weather") or data.get("current") or {}
+    ts = current.get("time")
+    temp = current.get("temperature") or current.get("temperature_2m")
+    wind = current.get("windspeed") or current.get("windspeed_10m")
+    cond = str(current.get("weathercode") or "")
+
+    if not ts:
+        # Defensive: derive ts from hourly if needed
+        hourly = data.get("hourly") or {}
+        times = hourly.get("time") or []
+        if times:
+            ts = times[-1]
+
+    # 6) Idempotent upsert of the weather event; always RETURNING id
     with get_conn() as conn, conn.cursor() as cur:
         cur.execute(
             """
             INSERT INTO weather_events (region, source, ts, temp_c, wind_kph, conditions, created_at)
-            VALUES (%s,%s,%s,%s,%s,%s,NOW())
+            VALUES (%s, %s, %s, %s, %s, %s, NOW())
+            ON CONFLICT (region, ts) DO UPDATE
+              SET temp_c = EXCLUDED.temp_c,
+                  wind_kph = EXCLUDED.wind_kph,
+                  conditions = EXCLUDED.conditions
             RETURNING id;
             """,
-            (
-                region,
-                "open-meteo",
-                current.get("time"),
-                current.get("temperature"),
-                current.get("windspeed"),
-                str(current.get("weathercode")),
-            ),
+            (region, "open-meteo", ts, temp, wind, cond),
         )
-        eid = cur.fetchone()[0]
+        event_id = cur.fetchone()[0]
         conn.commit()
-    logger.info({"event": "weather_event_inserted", "event_id": eid, "region": region})
-    return {"status": "ok", "event_id": eid, "current": current}
+
+    logger.info({"event": "weather_event_inserted", "cid": cid, "event_id": event_id, "region": region, "ts": ts})
+    return {"event_id": event_id, "region": region, "current": current}

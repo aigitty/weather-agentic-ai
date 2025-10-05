@@ -45,7 +45,8 @@ for row in rows:
     text = f"Weather in region {region} at {ts}: temperature {temp_c}°C, wind {wind_kph} kph, conditions {conditions}"
 
     # Create embedding
-    embedding = model.encode(text).astype(np.float32)
+    embedding = model.encode(text, normalize_embeddings=True).astype(np.float32)
+
 
     # Insert into embeddings table
     cur.execute("""

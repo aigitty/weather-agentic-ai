@@ -77,7 +77,7 @@ def rag_query(user_query: str):
     with conn.cursor() as cur:
         cur.execute("""
             SELECT we.id, we.region, we.ts, we.temp_c, we.wind_kph, we.conditions,
-                   (embedding.vector <-> %s::vector) AS distance
+                   (embedding.vector <=> %s::vector) AS distance
             FROM weather_event_embeddings embedding
             JOIN weather_events we ON embedding.weather_event_id = we.id
             ORDER BY distance ASC
