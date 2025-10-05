@@ -1,0 +1,35 @@
+{"asctime": "2025-10-04 10:47:04,582", "levelname": "INFO", "name": "worker", "message": "\ud83d\udd27 Using embedding model on cuda"}
+{"asctime": "2025-10-04 10:47:22,348", "levelname": "INFO", "name": "worker", "message": "\ud83d\ude80 Worker started: A2A polling + Auto-fetch loop enabled"}
+{"asctime": "2025-10-04 10:47:23,455", "levelname": "INFO", "name": "worker", "message": "", "event": "weather_event_inserted", "event_id": 496, "region": "12.9716,77.5946"}
+{"asctime": "2025-10-04 10:47:24,427", "levelname": "INFO", "name": "worker", "message": "", "event": "embedding_inserted", "embedding_id": 496, "event_id": 496}
+{"asctime": "2025-10-04 10:47:24,427", "levelname": "INFO", "name": "worker", "message": "\ud83d\udd01 Auto-fetch + embed done for Bangalore"}
+{"asctime": "2025-10-04 10:48:25,534", "levelname": "INFO", "name": "worker", "message": "", "event": "weather_event_inserted", "event_id": 497, "region": "12.9716,77.5946"}
+{"asctime": "2025-10-04 10:48:25,677", "levelname": "INFO", "name": "worker", "message": "", "event": "embedding_inserted", "embedding_id": 497, "event_id": 497}
+{"asctime": "2025-10-04 10:48:25,677", "levelname": "INFO", "name": "worker", "message": "\ud83d\udd01 Auto-fetch + embed done for Bangalore"}
+{"asctime": "2025-10-04 10:49:27,118", "levelname": "INFO", "name": "worker", "message": "", "event": "weather_event_inserted", "event_id": 498, "region": "12.9716,77.5946"}
+{"asctime": "2025-10-04 10:49:27,262", "levelname": "INFO", "name": "worker", "message": "", "event": "embedding_inserted", "embedding_id": 498, "event_id": 498}
+{"asctime": "2025-10-04 10:49:27,262", "levelname": "INFO", "name": "worker", "message": "\ud83d\udd01 Auto-fetch + embed done for Bangalore"}
+{"asctime": "2025-10-04 10:50:28,801", "levelname": "INFO", "name": "worker", "message": "", "event": "weather_event_inserted", "event_id": 499, "region": "12.9716,77.5946"}
+{"asctime": "2025-10-04 10:50:28,946", "levelname": "INFO", "name": "worker", "message": "", "event": "embedding_inserted", "embedding_id": 499, "event_id": 499}
+{"asctime": "2025-10-04 10:50:28,946", "levelname": "INFO", "name": "worker", "message": "\ud83d\udd01 Auto-fetch + embed done for Bangalore"}
+{"asctime": "2025-10-04 10:51:31,083", "levelname": "INFO", "name": "worker", "message": "", "event": "weather_event_inserted", "event_id": 500, "region": "12.9716,77.5946"}
+{"asctime": "2025-10-04 10:51:31,586", "levelname": "INFO", "name": "worker", "message": "", "event": "embedding_inserted", "embedding_id": 500, "event_id": 500}
+{"asctime": "2025-10-04 10:51:31,586", "levelname": "INFO", "name": "worker", "message": "\ud83d\udd01 Auto-fetch + embed done for Bangalore"}
+{"asctime": "2025-10-04 10:52:34,111", "levelname": "INFO", "name": "worker", "message": "", "event": "weather_event_inserted", "event_id": 501, "region": "12.9716,77.5946"}
+{"asctime": "2025-10-04 10:52:36,796", "levelname": "INFO", "name": "worker", "message": "", "event": "embedding_inserted", "embedding_id": 501, "event_id": 501}
+{"asctime": "2025-10-04 10:52:36,797", "levelname": "INFO", "name": "worker", "message": "\ud83d\udd01 Auto-fetch + embed done for Bangalore"}
+{"asctime": "2025-10-04 10:53:38,931", "levelname": "INFO", "name": "worker", "message": "", "event": "weather_event_inserted", "event_id": 502, "region": "12.9716,77.5946"}
+{"asctime": "2025-10-04 10:53:39,066", "levelname": "INFO", "name": "worker", "message": "", "event": "embedding_inserted", "embedding_id": 502, "event_id": 502}
+{"asctime": "2025-10-04 10:53:39,066", "levelname": "INFO", "name": "worker", "message": "\ud83d\udd01 Auto-fetch + embed done for Bangalore"}
+{"asctime": "2025-10-04 10:54:40,500", "levelname": "INFO", "name": "worker", "message": "", "event": "weather_event_inserted", "event_id": 503, "region": "12.9716,77.5946"}
+{"asctime": "2025-10-04 10:54:40,706", "levelname": "INFO", "name": "worker", "message": "", "event": "embedding_inserted", "embedding_id": 503, "event_id": 503}
+{"asctime": "2025-10-04 10:54:40,706", "levelname": "INFO", "name": "worker", "message": "\ud83d\udd01 Auto-fetch + embed done for Bangalore"}
+{"asctime": "2025-10-04 10:55:42,294", "levelname": "INFO", "name": "worker", "message": "", "event": "weather_event_inserted", "event_id": 504, "region": "12.9716,77.5946"}
+{"asctime": "2025-10-04 10:55:42,749", "levelname": "INFO", "name": "worker", "message": "", "event": "embedding_inserted", "embedding_id": 504, "event_id": 504}
+{"asctime": "2025-10-04 10:55:42,749", "levelname": "INFO", "name": "worker", "message": "\ud83d\udd01 Auto-fetch + embed done for Bangalore"}
+{"asctime": "2025-10-04 10:56:43,878", "levelname": "INFO", "name": "worker", "message": "", "event": "weather_event_inserted", "event_id": 505, "region": "12.9716,77.5946"}
+{"asctime": "2025-10-04 10:56:44,029", "levelname": "INFO", "name": "worker", "message": "", "event": "embedding_inserted", "embedding_id": 505, "event_id": 505}
+{"asctime": "2025-10-04 10:56:44,029", "levelname": "INFO", "name": "worker", "message": "\ud83d\udd01 Auto-fetch + embed done for Bangalore"}
+{"asctime": "2025-10-04 10:57:45,480", "levelname": "INFO", "name": "worker", "message": "", "event": "weather_event_inserted", "event_id": 506, "region": "12.9716,77.5946"}
+{"asctime": "2025-10-04 10:57:45,626", "levelname": "INFO", "name": "worker", "message": "", "event": "embedding_inserted", "embedding_id": 506, "event_id": 506}
+{"asctime": "2025-10-04 10:57:45,626", "levelname": "INFO", "name": "worker", "message": "\ud83d\udd01 Auto-fetch + embed done for Bangalore"}
