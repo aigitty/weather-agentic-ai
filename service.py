@@ -3,7 +3,7 @@ import os
 import time
 import json
 import logging
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 from typing import Optional, Dict, Any
 from fastapi import Request, HTTPException
 import psycopg2
@@ -13,6 +13,9 @@ from fastapi import FastAPI, Request, Response, HTTPException
 from fastapi.responses import JSONResponse, PlainTextResponse
 from dotenv import load_dotenv
 from prometheus_client import Counter, Histogram, generate_latest, CONTENT_TYPE_LATEST
+from prometheus_client import Gauge
+from llm_nvidia import chat_text
+
 
 
 # ---------- Logging: JSON to file ----------
@@ -25,6 +28,29 @@ if not any(isinstance(h, logging.FileHandler) for h in logger.handlers):
     fh.setLevel(logging.INFO)
     fh.setFormatter(jsonlogger.JsonFormatter("%(asctime)s %(levelname)s %(name)s %(message)s"))
     logger.addHandler(fh)
+    
+def log_event(level, event, **kwargs):
+    entry = {"event": event, "service": "weather-service", **kwargs}
+    logger.log(level, json.dumps(entry))
+    
+def geocode_place(name: str):
+    """Convert a place name (e.g. 'Udupi') to latitude & longitude using OpenStreetMap."""
+    import requests
+    try:
+        r = requests.get(
+            "https://nominatim.openstreetmap.org/search",
+            params={"q": name, "format": "json", "limit": 1},
+            headers={"User-Agent": "WeatherAgent/1.0"},
+            timeout=10
+        )
+
+        if r.status_code == 200 and r.json():
+            data = r.json()[0]
+            return float(data["lat"]), float(data["lon"])
+    except Exception as e:
+        logger.warning({"event": "geocode_error", "name": name, "error": str(e)})
+    return None, None
+
 
 # ---------- Env / DB ----------
 load_dotenv()
@@ -39,10 +65,13 @@ OPEN_METEO_URL = os.getenv("OPEN_METEO_URL", "https://api.open-meteo.com/v1/fore
 # ---------- Prometheus metrics ----------
 REQ_COUNT = Counter("service_requests_total", "HTTP requests", ["method", "path", "status"])
 REQ_LAT = Histogram("service_request_duration_seconds", "Request duration (s)", ["path"])
-TASKS_CREATED = Counter("a2a_tasks_created_total", "Tasks created", ["type"])
-TASKS_POLLED = Counter("a2a_tasks_polled_total", "Tasks polled", ["worker"])
-TASKS_COMPLETED = Counter("a2a_tasks_completed_total", "Tasks completed")
 WEATHER_CALLS = Counter("weather_calls_total", "Weather tool invocations", ["source"])
+# Track DB health
+DB_HEALTH = Gauge("db_connection_alive", "Database connectivity (1=up,0=down)")
+REGIONS_REGISTERED_TOTAL = Counter("regions_registered_total", "Regions registered", ["source"])
+
+# Track active connections
+ACTIVE_DB_CONNECTIONS = Gauge("service_db_connections", "Active PostgreSQL connections")
 
 def get_conn():
     return psycopg2.connect(
@@ -68,7 +97,18 @@ async def metrics_middleware(request: Request, call_next):
 # ---------- Health ----------
 @app.get("/health")
 def health():
+    try:
+        with get_conn() as conn, conn.cursor() as cur:
+            cur.execute("SELECT 1;")
+        DB_HEALTH.set(1)
+        ACTIVE_DB_CONNECTIONS.set(1)
+    except Exception:
+        DB_HEALTH.set(0)
+        ACTIVE_DB_CONNECTIONS.set(0)
+        raise HTTPException(status_code=500, detail="Database unreachable")
+
     return {"status": "ok", "time": datetime.now(timezone.utc).isoformat()}
+
 
 # ---------- Prometheus scrape ----------
 @app.get("/metrics")
@@ -97,193 +137,138 @@ def agent_card():
     }
     return JSONResponse(card)
 
-# ---------- A2A: create task ----------
-@app.post("/a2a/tasks")
-def create_task(body: Dict[str, Any]):
-    required = {"requester", "type", "payload"}
-    if not required.issubset(body):
-        raise HTTPException(status_code=400, detail="Missing required fields")
-
-    priority = body.get("priority", 50)
-
-    with get_conn() as conn, conn.cursor(cursor_factory=psycopg2.extras.DictCursor) as cur:
-        cur.execute(
-            """
-            INSERT INTO tasks (requester, type, payload, state, priority, created_at)
-            VALUES (%s, %s, %s::jsonb, 'pending', %s, NOW())
-            RETURNING id;
-            """,
-            (body["requester"], body["type"], json.dumps(body["payload"]), priority),
-        )
-        task_id = cur.fetchone()[0]
-        conn.commit()
-
-    TASKS_CREATED.labels(body["type"]).inc()
-    logger.info({"event": "task_created", "task_id": task_id, "type": body["type"], "priority": priority})
-    return {"id": task_id, "state": "pending", "priority": priority}
-
-# ---------- A2A: claim next ----------
-@app.post("/a2a/tasks/next")
-def claim_next_task(body: Dict[str, Any] = None):
-    worker = (body or {}).get("worker", "default-worker")
-
-    with get_conn() as conn, conn.cursor(cursor_factory=psycopg2.extras.DictCursor) as cur:
-        cur.execute(
-            """
-            SELECT id, type, payload, priority
-            FROM tasks
-            WHERE state = 'pending'
-            ORDER BY priority DESC, created_at ASC
-            FOR UPDATE SKIP LOCKED
-            LIMIT 1;
-            """
-        )
-        row = cur.fetchone()
-        if not row:
-            return {"task": None}
-
-        task_info = {
-            "id": row["id"],
-            "type": row["type"],
-            "payload": row["payload"],
-            "priority": row["priority"],
-        }
-
-        cur.execute(
-            """
-            UPDATE tasks
-            SET state = 'in_progress', started_at = NOW()
-            WHERE id = %s;
-            """,
-            (row["id"],),
-        )
-        conn.commit()
-
-    TASKS_POLLED.labels(worker).inc()
-    logger.info(f"worker {worker} claimed task {task_info['id']}")
-    return {"task": task_info}
-
-# ---------- A2A: poll (GET alias for workers) ----------
-@app.get("/a2a/tasks/poll")
-def poll_task(worker: str = "default-worker"):
-    """Alias endpoint for worker polling; same logic as claim_next_task."""
-    with get_conn() as conn, conn.cursor(cursor_factory=psycopg2.extras.DictCursor) as cur:
-        cur.execute(
-            """
-            SELECT id, type, payload, priority
-            FROM tasks
-            WHERE state = 'pending'
-            ORDER BY priority DESC, created_at ASC
-            FOR UPDATE SKIP LOCKED
-            LIMIT 1;
-            """
-        )
-        row = cur.fetchone()
-        if not row:
-            return {"task": None}
-
-        cur.execute(
-            "UPDATE tasks SET state='in_progress', started_at=NOW() WHERE id=%s;", (row["id"],)
-        )
-        conn.commit()
-
-    TASKS_POLLED.labels(worker).inc()
-    logger.info(f"worker {worker} polled and claimed task {row['id']}")
-    return {"task": dict(row)}
-
-
-# ---------- A2A: complete ----------
-@app.post("/a2a/tasks/{task_id}/complete")
-def complete_task(task_id: int, body: dict):
-    result = body.get("result", {})
-    error = body.get("error")
-
-    new_state = "completed" if error is None else "failed"
-
-    with get_conn() as conn, conn.cursor() as cur:
-        cur.execute(
-            """
-            UPDATE tasks
-            SET state = %s,
-                result = %s::jsonb,
-                error  = %s,
-                finished_at = NOW()
-            WHERE id = %s;
-            """,
-            (new_state, json.dumps(result), error, task_id),
-        )
-        conn.commit()
-
-    if new_state == "completed":
-        TASKS_COMPLETED.inc()
-    logger.info(f"task {task_id} marked as {new_state}")
-    return {"status": new_state, "id": task_id}
-
-
-# ---------- Weather tool ----------
-
-@app.post("/weather")
-def weather(request: Request, body: Dict[str, Any]):
-    # 1) Read inputs + CID
+@app.post("/regions/register")
+def register_region(body: Dict[str, Any]):
+    name = body.get("name")
     lat = body.get("latitude")
     lon = body.get("longitude")
+
+    if name:
+        name = name.strip().title()
+
+    # If name provided but no coordinates -> geocode it
+    if name and (lat is None or lon is None):
+        lat, lon = geocode_place(name)
+        if not lat or not lon:
+            raise HTTPException(status_code=400, detail=f"Could not find coordinates for {name}")
+        REGIONS_REGISTERED_TOTAL.labels("name").inc()
+    else:
+        REGIONS_REGISTERED_TOTAL.labels("coords").inc()
+
     if lat is None or lon is None:
-        raise HTTPException(status_code=400, detail="latitude & longitude required")
+        raise HTTPException(status_code=400, detail="latitude and longitude required")
 
-    cid = request.headers.get("X-Correlation-ID", "none")
-    region = f"{lat},{lon}"
+    if not (-90 <= lat <= 90 and -180 <= lon <= 180):
+        raise HTTPException(status_code=400, detail="Invalid lat/lon bounds.")
 
-    # 2) Build Open-Meteo request
+    region_name = (name or f"Region_{round(lat,2)}_{round(lon,2)}").strip().title()
+
+    with get_conn() as conn, conn.cursor() as cur:
+        cur.execute("""
+            INSERT INTO regions (name, latitude, longitude, active)
+            VALUES (%s, %s, %s, TRUE)
+            ON CONFLICT (latitude, longitude)
+            DO UPDATE SET active = TRUE, name = EXCLUDED.name
+            RETURNING id;
+        """, (region_name, lat, lon))
+        region_id = cur.fetchone()[0]
+        conn.commit()
+
+    logger.info({
+        "event": "region_registered",
+        "name": region_name,
+        "lat": lat,
+        "lon": lon,
+        "region_id": region_id
+    })
+    return {
+        "region_id": region_id,
+        "name": region_name,
+        "latitude": lat,
+        "longitude": lon,
+        "status": "active"
+    }
+    
+@app.post("/weather/live")
+def get_live_weather(body: Dict[str, Any]):
+    lat, lon = body["latitude"], body["longitude"]
     params = {
         "latitude": lat,
         "longitude": lon,
-        "hourly": "temperature_2m,precipitation,precipitation_probability,windspeed_10m,cloudcover",
-        "current_weather": "true",
-        "timezone": "Asia/Kolkata",  # canonical IANA
-        "forecast_days": 1,
+        "current_weather": True,
+        "timezone": "auto"
     }
-
-    # 3) Log that we’re calling the upstream
-    logger.info({"event": "openmeteo_call", "cid": cid, "params": params})
-
-    # 4) Call Open-Meteo
-    r = requests.get(OPEN_METEO_URL, params=params, timeout=20)
+    r = requests.get("https://api.open-meteo.com/v1/forecast", params=params, timeout=20)
     if r.status_code != 200:
         raise HTTPException(status_code=502, detail=f"Upstream error {r.status_code}")
+    return r.json()   # ✅ Return full JSON, not just .get("current_weather")
 
-    data = r.json()
 
-    # 5) Normalize a "current" payload
-    #    Prefer "current_weather" (Open-Meteo’s field), fallback to "current" if your code already constructs it.
-    current = data.get("current_weather") or data.get("current") or {}
-    ts = current.get("time")
-    temp = current.get("temperature") or current.get("temperature_2m")
-    wind = current.get("windspeed") or current.get("windspeed_10m")
-    cond = str(current.get("weathercode") or "")
+@app.post("/weather/history")
+def get_weather_history(body: Dict[str, Any]):
+    lat, lon = body["latitude"], body["longitude"]
+    end = datetime.now(timezone.utc).date()
+    start = end - timedelta(days=30)
+    params = {
+        "latitude": lat,
+        "longitude": lon,
+        "start_date": start.isoformat(),
+        "end_date": end.isoformat(),
+        "daily": "temperature_2m_max,temperature_2m_min,precipitation_sum,wind_speed_10m_max",
+        "timezone": "auto"
+    }
+    r = requests.get("https://archive-api.open-meteo.com/v1/archive", params=params, timeout=30)
+    if r.status_code != 200:
+        raise HTTPException(status_code=502, detail=f"Archive API error {r.status_code}")
+    return r.json()  # ✅ Return full archive JSON
 
-    if not ts:
-        # Defensive: derive ts from hourly if needed
-        hourly = data.get("hourly") or {}
-        times = hourly.get("time") or []
-        if times:
-            ts = times[-1]
 
-    # 6) Idempotent upsert of the weather event; always RETURNING id
-    with get_conn() as conn, conn.cursor() as cur:
-        cur.execute(
-            """
-            INSERT INTO weather_events (region, source, ts, temp_c, wind_kph, conditions, created_at)
-            VALUES (%s, %s, %s, %s, %s, %s, NOW())
-            ON CONFLICT (region, ts) DO UPDATE
-              SET temp_c = EXCLUDED.temp_c,
-                  wind_kph = EXCLUDED.wind_kph,
-                  conditions = EXCLUDED.conditions
-            RETURNING id;
-            """,
-            (region, "open-meteo", ts, temp, wind, cond),
-        )
-        event_id = cur.fetchone()[0]
-        conn.commit()
+@app.post("/weather/analyze")
+def analyze_weather(body: Dict[str, Any]):
+    region = body.get("region")
+    if not region:
+        raise HTTPException(status_code=400, detail="region required")
 
-    logger.info({"event": "weather_event_inserted", "cid": cid, "event_id": event_id, "region": region, "ts": ts})
-    return {"event_id": event_id, "region": region, "current": current}
+    # 1️⃣ Get coordinates
+    lat, lon = geocode_place(region)
+    if not lat or not lon:
+        raise HTTPException(status_code=404, detail=f"Could not find coordinates for {region}")
+
+    # 2️⃣ Fetch current + past data
+    current = get_live_weather({"latitude": lat, "longitude": lon})
+    history = get_weather_history({"latitude": lat, "longitude": lon})
+
+    # 3️⃣ Load external prompt from file and fill placeholders
+    prompt_path = os.path.join(os.path.dirname(__file__), "prompt.txt")
+    try:
+        with open(prompt_path, "r", encoding="utf-8") as f:
+            prompt_template = f.read()
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Prompt file missing or unreadable: {e}")
+
+    prompt = prompt_template.format(
+        region=region,
+        history=json.dumps(history, indent=2),
+        current=json.dumps(current, indent=2)
+    )
+    
+    logger.info({"event": "prompt_loaded", "path": prompt_path, "region": region})
+
+    # 4️⃣ Invoke LLM (use your ChatNVIDIA wrapper)
+        # 4️⃣ Invoke LLM
+    response = chat_text(prompt)
+
+    # 5️⃣ Store both raw data and LLM summary in DB
+    try:
+        with get_conn() as conn, conn.cursor() as cur:
+            cur.execute(
+                "INSERT INTO weather_logs (region, summary, created_at) VALUES (%s, %s, NOW());",
+                (region, response)
+            )
+            conn.commit()
+        logger.info({"event": "weather_summary_saved", "region": region})
+
+    except Exception as e:
+        logger.warning({"event": "weather_log_failed", "region": region, "error": str(e)})
+
+    return {"region": region, "summary": response}

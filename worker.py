@@ -15,6 +15,8 @@ from sentence_transformers import SentenceTransformer
 import torch
 from prometheus_client import Counter, Gauge, start_http_server
 from pythonjsonlogger import jsonlogger
+from prometheus_client import Histogram
+
 
 # ---------- Logging ----------
 os.makedirs("logs", exist_ok=True)
@@ -33,6 +35,8 @@ DB_PASS = os.getenv("POSTGRES_PASSWORD", "weather_pass")
 DB_NAME = os.getenv("POSTGRES_DB", "weather_db")
 DB_PORT = int(os.getenv("POSTGRES_PORT", "5432"))
 DB_HOST = "localhost"
+DB_HEALTH = Gauge("worker_db_connection_alive", "Database connectivity (1=up,0=down)")
+
 
 OPEN_METEO_URL = os.getenv("OPEN_METEO_URL", "https://api.open-meteo.com/v1/forecast")
 AGENT_ENDPOINT = os.getenv("AGENT_ENDPOINT", "http://127.0.0.1:8000")
@@ -45,6 +49,11 @@ WORKER_LOOP_ERRORS_TOTAL = Counter("worker_loop_errors_total", "Auto-fetch loop 
 A2A_POLLS_TOTAL = Counter("worker_a2a_polls_total", "A2A polls")
 A2A_TASKS_CLAIMED = Counter("worker_a2a_tasks_claimed_total", "A2A tasks claimed", ["type"])
 A2A_TASKS_DONE = Counter("worker_a2a_tasks_done_total", "A2A tasks completed", ["type"])
+
+AUTO_FETCH_LATENCY = Histogram(
+    "worker_auto_fetch_duration_seconds",
+    "Duration of each auto-fetch loop iteration"
+)
 
 # ---------- DB ----------
 def get_conn():
@@ -113,7 +122,7 @@ def fetch_current(lat: float, lon: float, headers: Optional[Dict[str, str]] = No
         "longitude": lon,
         "hourly": "temperature_2m,precipitation,precipitation_probability,windspeed_10m,cloudcover",
         "current_weather": "true",
-        "timezone": "Asia/Calcutta",
+        "timezone": "Asia/Kolkata",
         "forecast_days": 1,
     }
     r = requests.get(OPEN_METEO_URL, params=params, headers=headers, timeout=20)
@@ -144,103 +153,111 @@ async def poll_once():
 
 # ---------- Auto-fetch + embed ----------
 async def auto_fetch_loop():
-    region = "12.9716,77.5946"
-    lat, lon = 12.9716, 77.5946
-
     while True:
+        start_time = time.perf_counter()
         try:
-            # 🎯 Generate correlation ID
-            correlation_id = str(uuid.uuid4())[:8]
+            with get_conn() as conn, conn.cursor() as cur:
+                cur.execute("SELECT id, name, latitude, longitude FROM regions WHERE active = TRUE;")
+                regions = cur.fetchall()
 
-            # 🔹 Log before calling /weather
-            logger.info({
-                "event": "weather_api_triggered",
-                "region": region,
-                "cid": correlation_id,
-                "action": "calling service /weather endpoint"
-            })
-
-            # 🔹 Call FastAPI service (not Open-Meteo directly)
-            headers = {"X-Correlation-ID": correlation_id, "Content-Type": "application/json"}
-            r = requests.post(
-                f"{SERVICE_URL}/weather",
-                headers=headers,
-                json={"latitude": lat, "longitude": lon},
-                timeout=20,
-            )
-
-            if r.status_code != 200:
-                WEATHER_FETCH_TOTAL.labels(region, "fail").inc()
-                logger.error({
-                    "event": "fetch_fail",
-                    "region": region,
-                    "cid": correlation_id,
-                    "status": r.status_code,
-                    "error": r.text,
-                })
-                eid = None
-            else:
-                WEATHER_FETCH_TOTAL.labels(region, "ok").inc()
-                resp = r.json()
-                current = resp.get("current", {})
-                eid = resp.get("event_id")
+            for rid, name, lat, lon in regions:
+                region_key = f"{name} ({lat},{lon})"
+                correlation_id = str(uuid.uuid4())[:8]
                 logger.info({
-                    "event": "weather_event_received",
-                    "region": region,
+                    "event": "weather_api_triggered",
+                    "region": region_key,
                     "cid": correlation_id,
-                    "event_id": eid,
-                    "current": current,
+                    "action": "calling service /weather endpoint"
                 })
 
-            # 🔹 Only embed if event_id exists
-            if eid:
-                ts = current.get("time")
-                temp = current.get("temperature")
-                wind = current.get("windspeed")
-                cond = str(current.get("weathercode"))
-                text = f"Weather in region {region} at {ts}: temperature {temp}°C, wind {wind} kph, conditions {cond}"
+                headers = {"X-Correlation-ID": correlation_id, "Content-Type": "application/json"}
+                try:
+                    r = requests.post(
+                        f"{SERVICE_URL}/weather",
+                        headers=headers,
+                        json={"latitude": lat, "longitude": lon},
+                        timeout=20,
+                    )
+                    if r.status_code != 200:
+                        WEATHER_FETCH_TOTAL.labels(name, "fail").inc()
+                        logger.error({
+                            "event": "fetch_fail",
+                            "region": region_key,
+                            "cid": correlation_id,
+                            "status": r.status_code,
+                            "error": r.text,
+                        })
+                        continue
 
-                vec = embedding_model.encode([text], normalize_embeddings=True)[0]
-                emb_id = insert_weather_embedding(eid, "sentence-transformers/all-mpnet-base-v2", vec, text)
-                WEATHER_EMBED_TOTAL.labels("sentence-transformers/all-mpnet-base-v2").inc()
-
-                if emb_id:
+                    WEATHER_FETCH_TOTAL.labels(name, "ok").inc()
+                    resp = r.json()
+                    current = resp.get("current", {})
+                    eid = resp.get("event_id")
                     logger.info({
-                        "event": "embedding_inserted",
+                        "event": "weather_event_received",
+                        "region": region_key,
                         "cid": correlation_id,
-                        "embedding_id": emb_id,
                         "event_id": eid,
+                        "current": current,
                     })
-                else:
-                    logger.info({
-                        "event": "embedding_skipped",
+
+                    if eid:
+                        ts = current.get("time")
+                        temp = current.get("temperature")
+                        wind = current.get("windspeed")
+                        cond = str(current.get("weathercode"))
+                        text = f"Weather in {name} ({lat},{lon}) at {ts}: temperature {temp}°C, wind {wind} kph, conditions {cond}"
+                        vec = embedding_model.encode([text], normalize_embeddings=True)[0]
+                        emb_id = insert_weather_embedding(eid, "sentence-transformers/all-mpnet-base-v2", vec, text)
+                        WEATHER_EMBED_TOTAL.labels("sentence-transformers/all-mpnet-base-v2").inc()
+
+                        if emb_id:
+                            logger.info({
+                                "event": "embedding_inserted",
+                                "cid": correlation_id,
+                                "embedding_id": emb_id,
+                                "event_id": eid,
+                            })
+                        else:
+                            logger.info({
+                                "event": "embedding_skipped",
+                                "cid": correlation_id,
+                                "region": region_key,
+                                "reason": "duplicate",
+                                "event_id": eid
+                            })
+
+                except Exception as e:
+                    WORKER_LOOP_ERRORS_TOTAL.labels("auto_fetch").inc()
+                    logger.exception({
+                        "event": "auto_fetch_error",
+                        "error": str(e),
                         "cid": correlation_id,
-                        "region": region,
-                        "reason": "duplicate",
-                        "event_id": eid
+                        "region": region_key,
                     })
 
-        except Exception as e:
-            WORKER_LOOP_ERRORS_TOTAL.labels("auto_fetch").inc()
-            logger.exception({
-                "event": "auto_fetch_error",
-                "error": str(e),
-                "cid": correlation_id,
-            })
-
-        # wait a bit (adjust as needed)
-        await asyncio.sleep(60)
+        finally:
+            dur = time.perf_counter() - start_time
+            AUTO_FETCH_LATENCY.observe(dur)
+            logger.info({"event": "auto_fetch_duration", "latency_sec": round(dur, 3)})
+            await asyncio.sleep(60)
 
 
 async def main():
-    # Expose worker metrics on :9000
     start_http_server(9000, addr="127.0.0.1")
     logger.info("🚀 Worker started: A2A polling + Auto-fetch loop enabled")
 
-    # run both loops
+    try:
+        with get_conn() as conn, conn.cursor() as cur:
+            cur.execute("SELECT 1")
+        DB_HEALTH.set(1)
+    except Exception:
+        DB_HEALTH.set(0)
+        logger.error({"event": "db_health_check_failed"})
+
     await asyncio.gather(
         auto_fetch_loop(),
-        *(poll_once() for _ in range(0)),  # no immediate polls at start
+        *(poll_once() for _ in range(0)),
         poll_forever()
     )
 
