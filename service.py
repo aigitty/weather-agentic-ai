@@ -5,7 +5,7 @@ import json
 import logging
 from datetime import datetime, timezone, timedelta
 from typing import Optional, Dict, Any
-from fastapi import Request, HTTPException
+from fastapi import Request, HTTPException, Body
 import psycopg2
 import psycopg2.extras
 import requests
@@ -15,6 +15,8 @@ from dotenv import load_dotenv
 from prometheus_client import Counter, Histogram, generate_latest, CONTENT_TYPE_LATEST
 from prometheus_client import Gauge
 from llm_nvidia import chat_text
+from pydantic import BaseModel
+from forecast_agent import forecast_summary
 
 
 
@@ -28,6 +30,11 @@ if not any(isinstance(h, logging.FileHandler) for h in logger.handlers):
     fh.setLevel(logging.INFO)
     fh.setFormatter(jsonlogger.JsonFormatter("%(asctime)s %(levelname)s %(name)s %(message)s"))
     logger.addHandler(fh)
+    
+class ChatReq(BaseModel):
+    query: str
+    region: Optional[str] = None
+
     
 def log_event(level, event, **kwargs):
     entry = {"event": event, "service": "weather-service", **kwargs}
@@ -80,6 +87,10 @@ def get_conn():
 
 app = FastAPI(title="Weather Agent Service")
 
+@app.get("/")
+def root():
+    return {"status": "ok", "message": "Weather Agent API is running"}
+
 # ---------- Middleware: metrics per request ----------
 @app.middleware("http")
 async def metrics_middleware(request: Request, call_next):
@@ -115,6 +126,27 @@ def health():
 def metrics():
     return Response(generate_latest(), media_type=CONTENT_TYPE_LATEST)
 
+class RegionRequest(BaseModel):
+    region: str
+
+
+def geocode_region_name(name: str):
+    """Uses Open-Meteo geocoding API to get latitude & longitude."""
+    try:
+        r = requests.get(
+            "https://geocoding-api.open-meteo.com/v1/search",
+            params={"name": name, "count": 1, "language": "en", "format": "json"},
+            timeout=10,
+        )
+        r.raise_for_status()
+        js = r.json()
+        if not js.get("results"):
+            raise HTTPException(status_code=404, detail=f"Could not geocode region: {name}")
+        res = js["results"][0]
+        return res["latitude"], res["longitude"]
+    except Exception as e:
+        raise HTTPException(status_code=502, detail=f"Geocoding failed: {e}")
+
 # ---------- MCP-style agent card ----------
 @app.get("/.well-known/agent.json")
 def agent_card():
@@ -136,6 +168,58 @@ def agent_card():
         },
     }
     return JSONResponse(card)
+
+@app.get("/weather/archive/.well-known/agent.json")
+def archive_agent_card():
+    """
+    Archive Agent metadata for A2A discovery.
+    """
+    return {
+        "id": "archive-agent",
+        "name": "Archive Weather Agent",
+        "description": "Analyzes past 30-day weather patterns and trends from Open-Meteo archive API.",
+        "service_endpoint": "http://localhost:8000/weather/archive-analyze",
+        "capabilities": {
+            "tasks": ["analyze_past_weather"],
+            "tools": ["fetch_archive_data", "summarize_trends"]
+        }
+    }
+
+@app.get("/weather/super/.well-known/agent.json")
+def super_agent_card():
+    """
+    Super Analyzer Agent metadata for A2A discovery.
+    """
+    return {
+        "id": "super-analyzer-agent",
+        "name": "Super Analyzer Agent",
+        "description": (
+            "Combines current, past-hourly, and next-hourly weather data for "
+            "anomaly detection, trend analysis, and friendly summarization."
+        ),
+        "service_endpoint": "http://localhost:8000/weather/super-analyze",
+        "capabilities": {
+            "tasks": ["detect_weather_anomalies", "generate_summary"],
+            "tools": ["fetch_hourly_data", "reason_over_conditions"]
+        }
+    }
+
+@app.get("/weather/forecast/.well-known/agent.json")
+def forecast_agent_card():
+    """
+    Forecast Agent metadata for A2A discovery.
+    """
+    return {
+        "id": "forecast-agent",
+        "name": "Forecast Weather Agent",
+        "description": "Generates 7-day weather forecasts and summarizes predicted patterns.",
+        "service_endpoint": "http://localhost:8000/weather/forecast-analyze",
+        "capabilities": {
+            "tasks": ["generate_forecast"],
+            "tools": ["fetch_forecast_data", "summarize_predictions"]
+        }
+    }
+
 
 @app.post("/regions/register")
 def register_region(body: Dict[str, Any]):
@@ -195,14 +279,32 @@ def get_live_weather(body: Dict[str, Any]):
     params = {
         "latitude": lat,
         "longitude": lon,
+        "hourly": (
+            "temperature_2m,relative_humidity_2m,"
+            "precipitation,pressure_msl,cloud_cover,"
+            "wind_speed_10m,apparent_temperature,uv_index"
+        ),
         "current_weather": True,
-        "timezone": "auto"
+        "timezone": "auto",
     }
+
     r = requests.get("https://api.open-meteo.com/v1/forecast", params=params, timeout=20)
     if r.status_code != 200:
         raise HTTPException(status_code=502, detail=f"Upstream error {r.status_code}")
-    return r.json()   # ✅ Return full JSON, not just .get("current_weather")
 
+    data = r.json()
+    # merge current snapshot + latest hourly sample
+    result = {
+        "current_weather": data.get("current_weather", {}),
+        "hourly": {k: v[-1] if isinstance(v, list) else v for k, v in data.get("hourly", {}).items()},
+        "meta": {
+            "latitude": data.get("latitude"),
+            "longitude": data.get("longitude"),
+            "elevation": data.get("elevation"),
+            "timezone": data.get("timezone"),
+        },
+    }
+    return result
 
 @app.post("/weather/history")
 def get_weather_history(body: Dict[str, Any]):
@@ -214,7 +316,15 @@ def get_weather_history(body: Dict[str, Any]):
         "longitude": lon,
         "start_date": start.isoformat(),
         "end_date": end.isoformat(),
-        "daily": "temperature_2m_max,temperature_2m_min,precipitation_sum,wind_speed_10m_max",
+        "daily": (
+            "temperature_2m_max,temperature_2m_min,"
+            "precipitation_sum,wind_speed_10m_max,"
+            "humidity_2m_max,humidity_2m_min,"
+            "uv_index_max,pressure_msl,"
+            "snowfall_sum,cloud_cover_mean,"
+            "apparent_temperature_max,apparent_temperature_min,"
+            "sea_level_pressure_mean"
+        ),
         "timezone": "auto"
     }
     r = requests.get("https://archive-api.open-meteo.com/v1/archive", params=params, timeout=30)
@@ -272,3 +382,99 @@ def analyze_weather(body: Dict[str, Any]):
         logger.warning({"event": "weather_log_failed", "region": region, "error": str(e)})
 
     return {"region": region, "summary": response}
+
+
+@app.post("/weather/forecast-analyze")
+def forecast_analyze(req: RegionRequest):
+    region = req.region.strip()
+    lat, lon = geocode_region_name(region)
+    summary = forecast_summary(region, lat, lon)
+    return {"region": region, "summary": summary}
+
+
+# ---------- Archive Agent ----------
+@app.post("/weather/archive-analyze")
+def archive_analyze(body: Dict[str, Any]):
+    region = body.get("region")
+    if not region:
+        raise HTTPException(status_code=400, detail="region is required")
+
+    # --- Step 1: Geocode region ---
+    geo = requests.get(
+        f"https://geocoding-api.open-meteo.com/v1/search?name={region}&count=1&language=en&format=json"
+    ).json()
+    if not geo.get("results"):
+        raise HTTPException(status_code=404, detail=f"Could not geocode region {region}")
+
+    lat = geo["results"][0]["latitude"]
+    lon = geo["results"][0]["longitude"]
+
+    # --- Step 2: Import and run Archive Agent ---
+    from archive_agent import analyze_archive
+    result = analyze_archive(region, lat, lon)
+
+    # --- Step 3: Optional DB log ---
+    try:
+        with get_conn() as conn, conn.cursor() as cur:
+            cur.execute(
+                "INSERT INTO weather_logs (region, summary, created_at) VALUES (%s, %s, NOW());",
+                (region, result),
+            )
+            conn.commit()
+        logger.info({"event": "archive_analyze_saved", "region": region})
+    except Exception as e:
+        logger.warning({"event": "archive_analyze_log_failed", "error": str(e)})
+
+    return {"region": region, "summary": result}
+
+
+@app.post("/weather/super-analyze")
+def super_analyze(body: Dict[str, Any]):
+    region = body.get("region")
+    if not region:
+        raise HTTPException(status_code=400, detail="region is required")
+
+    # --- Step 1: Geocode region ---
+    geo = requests.get(
+        f"https://geocoding-api.open-meteo.com/v1/search?name={region}&count=1&language=en&format=json"
+    ).json()
+    if not geo.get("results"):
+        raise HTTPException(status_code=404, detail="Could not geocode region")
+
+    lat = geo["results"][0]["latitude"]
+    lon = geo["results"][0]["longitude"]
+
+    # --- Step 2: Run Super Analyzer ---
+    from super_analyzer_agent import analyze_weather
+    result = analyze_weather(region, lat, lon)
+
+    # --- Step 3: Optional DB log (if you want to store summary) ---
+    try:
+        with get_conn() as conn, conn.cursor() as cur:
+            cur.execute(
+                "INSERT INTO weather_logs (region, summary, created_at) VALUES (%s, %s, NOW());",
+                (region, result),
+            )
+            conn.commit()
+        logger.info({"event": "super_analyze_saved", "region": region})
+    except Exception as e:
+        logger.warning({"event": "super_analyze_log_failed", "error": str(e)})
+
+    return {"region": region, "summary": result}
+
+@app.post("/chat")
+def chat_route(payload: ChatReq):
+    # import only when endpoint is hit
+    from langgraph_orchestrator import run_query
+    st = run_query(payload.query, payload.region)
+    return {
+        "region": st.region,
+        "intent": st.intent,
+        "final": st.final_message,
+        "debug": {
+            "archive_summary": st.archive_summary,
+            "current_analysis": st.current_analysis,
+            "forecast_summary": st.forecast_summary,
+        },
+    }
+
