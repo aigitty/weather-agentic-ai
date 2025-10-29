@@ -14,6 +14,8 @@ import time
 import os
 import sys
 import re
+from router_agent import route_question_to_agents
+
 
 print("🧭 Running orchestrator file from:", os.path.abspath(__file__))
 print("Loaded modules containing 'orchestrator':")
@@ -45,6 +47,12 @@ class OrchestratorState(BaseModel):
     archive_summary:  Annotated[Optional[str], LastValue(str)] = None
     forecast_summary: Annotated[Optional[str], LastValue(str)] = None
     final_message:    Annotated[Optional[str], LastValue(str)] = None
+    
+    # router decisions
+    want_current: bool = False
+    want_history: bool = False
+    want_forecast: bool = False
+    route_index: int = 0
 
     meta: Dict[str, Any] = Field(default_factory=dict)
 
@@ -52,40 +60,6 @@ class OrchestratorState(BaseModel):
 # You can swap this with your local LLM later if you want.
 KEYS_HISTORY  = ("past", "yesterday", "last week", "last 7", "last month", "histor")
 KEYS_FORECAST = ("tomorrow", "next", "forecast", "coming", "later", "hour", "day")
-import re
-
-def detect_intent(text: str) -> str:
-    t = (text or "").lower()
-
-    # --- HISTORY ---
-    if (
-        "last" in t or "ago" in t or "past" in t or "before" in t
-        or "day before yesterday" in t
-        or re.search(r"\byest[a-z]*\b", t)   # yesterday, yestersay, yerstdays...
-        or re.search(r"\b(on|for)\s+\d{1,2}\s+\w+\s*(\d{4})?\b", t)  # explicit past dates
-    ):
-        return "history"
-
-    # --- FORECAST: add strong week signals ---
-    if any(x in t for x in [
-        "tomorrow","next","coming","future","later","upcoming",
-        "this week","next week","over the week","for the week",
-        "next 7 days","coming week","weekend","this weekend"
-    ]):
-        return "forecast"
-
-    # If a relative phrase like "today" appears with "this week", prefer forecast
-    if ("this week" in t or "next 7 days" in t) and ("today" in t or "now" in t):
-        return "forecast"
-
-    # --- CURRENT ---
-    if any(x in t for x in ["current","now","today","as of","right now","present"]):
-        return "current"
-
-    # --- Simple date heuristic stays as you had, if needed ---
-
-    return "mixed"
-
 
 # ---- HTTP helpers ----
 def post_agent(url: str, payload: dict, timeout: float = 25.0) -> dict:
@@ -96,10 +70,32 @@ def post_agent(url: str, payload: dict, timeout: float = 25.0) -> dict:
 
 # ---- Nodes ----
 def node_router(state: OrchestratorState):
-    region = state.region.strip() if state.region else state.query.strip()
-    intent = state.intent or detect_intent(state.query)
-    # return only what changed
-    return {"region": region, "intent": intent}
+    """LLM-based router using router_agent"""
+    from router_agent import route_question_to_agents
+
+    sel = route_question_to_agents(state.query)
+
+    want_current  = bool(sel.get("super_analyze"))
+    want_history  = bool(sel.get("archive_analyze"))
+    want_forecast = bool(sel.get("forecast_analyze"))
+
+    # Derive a human intent label
+    count = sum([want_current, want_history, want_forecast])
+    intent = (
+        "mixed" if count > 1
+        else "current" if want_current
+        else "history" if want_history
+        else "forecast" if want_forecast
+        else "current"
+    )
+
+    return {
+        "want_current": want_current,
+        "want_history": want_history,
+        "want_forecast": want_forecast,
+        "intent": intent,
+        "route_index": 0,
+    }
 
 
 def node_archive(state: OrchestratorState):
@@ -151,44 +147,46 @@ def node_compose(state: OrchestratorState):
 def build_graph():
     g = StateGraph(OrchestratorState)
 
+    g.add_node("router", node_router)
     g.add_node("super", node_super)
     g.add_node("archive", node_archive)
     g.add_node("forecast", node_forecast)
     g.add_node("compose", node_compose)
 
-    # Entry routing
-    g.add_conditional_edges(
-        START,
-        lambda s: s.intent,
-        {
-            "current": "super",
-            "history": "archive",
-            "forecast": "forecast",
-            "mixed": "super",        # run all, starting at super
-        },
-    )
+    # Start → Router
+    g.add_edge(START, "router")
 
-    # After SUPER: go to ARCHIVE only for mixed, else compose
+    # Router → first chosen agent
+    def first_hop(state: OrchestratorState) -> str:
+        if state.want_current:
+            return "super"
+        if state.want_history:
+            return "archive"
+        if state.want_forecast:
+            return "forecast"
+        return "compose"
+
+    g.add_conditional_edges("router", first_hop, {
+        "super": "super",
+        "archive": "archive",
+        "forecast": "forecast",
+        "compose": "compose",
+    })
+
+    # Keep the rest of your chain as before
     g.add_conditional_edges(
         "super",
-        lambda s: "archive" if s.intent == "mixed" else "compose",
+        lambda s: "archive" if s.want_history else "compose",
         {"archive": "archive", "compose": "compose"},
     )
-
-    # After ARCHIVE: go to FORECAST only for mixed, else compose
     g.add_conditional_edges(
         "archive",
-        lambda s: "forecast" if s.intent == "mixed" else "compose",
+        lambda s: "forecast" if s.want_forecast else "compose",
         {"forecast": "forecast", "compose": "compose"},
     )
-
-    # After FORECAST: always compose
     g.add_edge("forecast", "compose")
-
-    # Final
     g.add_edge("compose", END)
     return g.compile()
-
 
 
 # Convenience entry point
@@ -214,19 +212,21 @@ def extract_region(text: str) -> str:
 
 
 def run_query(query: str, region: Optional[str] = None) -> OrchestratorState:
+    """Main entry to run LangGraph with router + agents + compose."""
     region_clean = extract_region(region or query)
-    intent = detect_intent(query)
+    print(f"🧭 Router deciding for region: {region_clean}")
 
-    # ✅ Add this line here:
-    print(f"🧭 Intent: {intent}, Region: {region_clean}")
+    # initialize state
+    init = OrchestratorState(query=query, region=region_clean)
 
-    init = OrchestratorState(
-        query=query,
-        region=region_clean,
-        intent=intent,
-    )
+    # build and run the graph
+    graph = build_graph()
     result = graph.invoke(init)
-    return OrchestratorState(**result)
+
+    # Convert result into OrchestratorState object
+    if isinstance(result, dict):
+        return OrchestratorState(**result)
+    return result
 
 
 def wait_for_service(url="http://127.0.0.1:8000/health", timeout=10):

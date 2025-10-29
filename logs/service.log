@@ -289,3 +289,7 @@
 {"asctime": "2025-10-27 19:41:35,627", "levelname": "INFO", "name": "service", "message": "", "event": "archive_analyze_saved", "region": "Pune"}
 {"asctime": "2025-10-27 19:43:06,884", "levelname": "INFO", "name": "service", "message": "", "event": "super_analyze_saved", "region": "Srinagar"}
 {"asctime": "2025-10-27 19:43:18,212", "levelname": "INFO", "name": "service", "message": "", "event": "archive_analyze_saved", "region": "Srinagar"}
+{"asctime": "2025-10-29 11:20:36,897", "levelname": "INFO", "name": "service", "message": "", "event": "archive_analyze_saved", "region": "Ayodhya"}
+{"asctime": "2025-10-29 11:47:51,335", "levelname": "INFO", "name": "service", "message": "", "event": "super_analyze_saved", "region": "kochi"}
+{"asctime": "2025-10-29 11:51:48,688", "levelname": "INFO", "name": "service", "message": "", "event": "super_analyze_saved", "region": "Udupi"}
+{"asctime": "2025-10-29 11:56:50,808", "levelname": "INFO", "name": "service", "message": "", "event": "super_analyze_saved", "region": "Munnar"}
