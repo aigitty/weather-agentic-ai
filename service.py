@@ -17,7 +17,7 @@ from prometheus_client import Gauge
 from llm_nvidia import chat_text
 from pydantic import BaseModel
 from forecast_agent import forecast_summary
-
+from alert_agent import run_alert_agent
 
 
 # ---------- Logging: JSON to file ----------
@@ -40,24 +40,38 @@ def log_event(level, event, **kwargs):
     entry = {"event": event, "service": "weather-service", **kwargs}
     logger.log(level, json.dumps(entry))
     
-def geocode_place(name: str):
-    """Convert a place name (e.g. 'Udupi') to latitude & longitude using OpenStreetMap."""
+def geocode_place(region: str):
+    """Geocode a place name using Nominatim (primary) and Open-Meteo fallback."""
     import requests
+
+    # 1. Try Nominatim
     try:
         r = requests.get(
             "https://nominatim.openstreetmap.org/search",
-            params={"q": name, "format": "json", "limit": 1},
-            headers={"User-Agent": "WeatherAgent/1.0"},
+            params={"q": region, "format": "json", "limit": 1},
+            headers={"User-Agent": "WeatherAgenticAI"},
             timeout=10
         )
+        if r.ok and r.json():
+            result = r.json()[0]
+            return float(result["lat"]), float(result["lon"])
+    except Exception:
+        pass
 
-        if r.status_code == 200 and r.json():
-            data = r.json()[0]
-            return float(data["lat"]), float(data["lon"])
-    except Exception as e:
-        logger.warning({"event": "geocode_error", "name": name, "error": str(e)})
+    # 2. Fallback to Open-Meteo
+    try:
+        g = requests.get(
+            "https://geocoding-api.open-meteo.com/v1/search",
+            params={"name": region, "count": 1, "language": "en", "format": "json"},
+            timeout=10
+        )
+        geo = g.json()
+        if geo.get("results"):
+            return geo["results"][0]["latitude"], geo["results"][0]["longitude"]
+    except Exception:
+        pass
+
     return None, None
-
 
 # ---------- Env / DB ----------
 load_dotenv()
@@ -387,7 +401,10 @@ def analyze_weather(body: Dict[str, Any]):
 @app.post("/weather/forecast-analyze")
 def forecast_analyze(req: RegionRequest):
     region = req.region.strip()
-    lat, lon = geocode_region_name(region)
+    lat, lon = geocode_place(region)
+    if not lat or not lon:
+        raise HTTPException(status_code=404, detail=f"Could not geocode region: {region}")
+
     summary = forecast_summary(region, lat, lon)
     return {"region": region, "summary": summary}
 
@@ -400,14 +417,10 @@ def archive_analyze(body: Dict[str, Any]):
         raise HTTPException(status_code=400, detail="region is required")
 
     # --- Step 1: Geocode region ---
-    geo = requests.get(
-        f"https://geocoding-api.open-meteo.com/v1/search?name={region}&count=1&language=en&format=json"
-    ).json()
-    if not geo.get("results"):
-        raise HTTPException(status_code=404, detail=f"Could not geocode region {region}")
-
-    lat = geo["results"][0]["latitude"]
-    lon = geo["results"][0]["longitude"]
+        # --- Step 1: Geocode region (using unified geocoder) ---
+    lat, lon = geocode_place(region)
+    if not lat or not lon:
+        raise HTTPException(status_code=404, detail=f"Could not geocode region: {region}")
 
     # --- Step 2: Import and run Archive Agent ---
     from archive_agent import analyze_archive
@@ -435,14 +448,10 @@ def super_analyze(body: Dict[str, Any]):
         raise HTTPException(status_code=400, detail="region is required")
 
     # --- Step 1: Geocode region ---
-    geo = requests.get(
-        f"https://geocoding-api.open-meteo.com/v1/search?name={region}&count=1&language=en&format=json"
-    ).json()
-    if not geo.get("results"):
-        raise HTTPException(status_code=404, detail="Could not geocode region")
-
-    lat = geo["results"][0]["latitude"]
-    lon = geo["results"][0]["longitude"]
+        # --- Step 1: Geocode region (using unified geocoder) ---
+    lat, lon = geocode_place(region)
+    if not lat or not lon:
+        raise HTTPException(status_code=404, detail=f"Could not geocode region: {region}")
 
     # --- Step 2: Run Super Analyzer ---
     from super_analyzer_agent import analyze_weather
@@ -478,3 +487,11 @@ def chat_route(payload: ChatReq):
         },
     }
 
+@app.post("/weather/alert-analyze")
+def alert_analyze(payload: dict):
+    region = payload.get("region")
+    lat = payload.get("lat")
+    lon = payload.get("lon")
+    if not region or lat is None or lon is None:
+        return {"error": "Missing region, lat, or lon"}
+    return run_alert_agent(region, lat, lon)

@@ -1,20 +1,11 @@
 import json
 from typing import Dict
 from llm_nvidia import chat_text
+import os
 
-SYSTEM_PROMPT = """You are a routing controller for a weather agentic system.
-
-Available agents:
-1) super_analyze      → for current/real-time questions, alerts, 'now', 'today'.
-2) archive_analyze    → for past/historical questions (yesterday, last week, past dates).
-3) forecast_analyze   → for future/predictions (tomorrow, next week, upcoming dates).
-
-Given a user question, respond with JSON ONLY, no text. The JSON keys:
-{
-  "super_analyze": true/false,
-  "archive_analyze": true/false,
-  "forecast_analyze": true/false
-}"""
+PROMPT_PATH = os.path.join(os.path.dirname(__file__), "router_prompt.txt")
+with open(PROMPT_PATH, "r", encoding="utf-8") as f:
+    SYSTEM_PROMPT = f.read()
 
 def route_question_to_agents(user_question: str) -> Dict[str, bool]:
     """Ask LLM to select which agents to call. Returns a dict of 3 booleans."""
@@ -34,6 +25,7 @@ Respond strictly with JSON only (no explanations)."""
             "super_analyze": bool(j.get("super_analyze")),
             "archive_analyze": bool(j.get("archive_analyze")),
             "forecast_analyze": bool(j.get("forecast_analyze")),
+            "alert_analyze": bool(j.get("alert_analyze")),
         }
     except Exception:
         # Safe default: if parsing fails, assume current only
