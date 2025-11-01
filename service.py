@@ -488,10 +488,16 @@ def chat_route(payload: ChatReq):
     }
 
 @app.post("/weather/alert-analyze")
-def alert_analyze(payload: dict):
+async def alert_analyze(payload: dict):
     region = payload.get("region")
     lat = payload.get("lat")
     lon = payload.get("lon")
-    if not region or lat is None or lon is None:
-        return {"error": "Missing region, lat, or lon"}
-    return run_alert_agent(region, lat, lon)
+
+    result = run_alert_agent(region, lat, lon)
+
+    return {
+        "region": region,
+        "alert_level": result["alert_level"],
+        "hazards": result["hazards"],
+        "alert_summary": result["alert_summary"],
+    }

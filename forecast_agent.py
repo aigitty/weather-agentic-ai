@@ -15,7 +15,7 @@ def fetch_forecast(lat: float, lon: float) -> dict:
     "daily": (
         "temperature_2m_max,temperature_2m_min,"
         "apparent_temperature_max,apparent_temperature_min,"
-        "precipitation_sum,wind_speed_10m_max,"
+        "precipitation_sum,windspeed_10m_max,"
         "wind_gusts_10m_max,cloud_cover_mean,"
         "snowfall_sum,precipitation_hours,"
         "sunrise,sunset,shortwave_radiation_sum"

@@ -155,33 +155,37 @@ def node_forecast(state: OrchestratorState):
 
 def node_compose(state: OrchestratorState):
     q = (state.query or "").lower()
+    prefix = ""
 
-    # 1) If the router intent is ALERT, return only the alert summary (no softening).
-    if state.intent == "alert":
-        txt = (state.alert_summary or "").strip()
-        return {"final_message": txt or "⚠️ No active alerts reported."}
+    alert_level = getattr(state, "alert_level", None)
+    hazards = getattr(state, "hazards", [])
 
-    # 2) If any alert content exists (mixed or other intents), put it FIRST, then add the rest.
+    # Highlight severity
+    if alert_level == "RED":
+        prefix = "🚨 **RED ALERT — Extreme Weather Expected!**\n\n"
+    elif alert_level == "ORANGE":
+        prefix = "⚠️ **ORANGE ALERT — Stay Prepared.**\n\n"
+    elif alert_level == "YELLOW":
+        prefix = "🟡 **YELLOW ALERT — Mild Risk.**\n\n"
+
+    # List hazards if any
+    hazard_text = ""
+    if hazards and isinstance(hazards, list) and any("No significant" not in h for h in hazards):
+        hazard_text = f"**Detected Hazards:** {', '.join(hazards)}\n\n"
+
+    # ------------- COMPOSITION SECTION -------------
+    # If we already have alert summaries, prioritize them
     if state.alert_summary:
-        parts = [state.alert_summary.strip()]
+        parts = []
+        if state.alert_summary: parts.append(state.alert_summary.strip())
+        if state.current_analysis: parts.append(state.current_analysis.strip())
+        if state.forecast_summary: parts.append(state.forecast_summary.strip())
+        if state.archive_summary:  parts.append(state.archive_summary.strip())
 
-        # Prefer the intent-specific section next, then the others.
-        if state.intent == "current" and state.current_analysis:
-            parts.append(state.current_analysis.strip())
-        elif state.intent == "forecast" and state.forecast_summary:
-            parts.append(state.forecast_summary.strip())
-        elif state.intent == "history" and state.archive_summary:
-            parts.append(state.archive_summary.strip())
-        else:
-            # mixed or unspecified: include all remaining in a sensible order
-            if state.current_analysis: parts.append(state.current_analysis.strip())
-            if state.forecast_summary: parts.append(state.forecast_summary.strip())
-            if state.archive_summary:  parts.append(state.archive_summary.strip())
-
-        text = "\n\n".join(p for p in parts if p)
+        text = prefix + hazard_text + "\n\n".join(p for p in parts if p)
         return {"final_message": text or "⚠️ No data composed."}
 
-    # 3) No alerts present → keep your existing intent-driven behavior.
+    # ------------- NO ALERTS CASE -------------
     if state.intent == "history":
         text = (state.archive_summary or "").strip()
     elif state.intent == "forecast":
@@ -199,8 +203,7 @@ def node_compose(state: OrchestratorState):
         text = "\n\n".join(p for p in parts if p)
 
     return {"final_message": text or "⚠️ No data composed."}
-
-
+    
 
 def node_reason(state: OrchestratorState):
     """Let the LLM reason about user context (e.g., 'Can I go for a run?')."""
@@ -227,16 +230,19 @@ def node_alert(state: OrchestratorState):
     import requests
     region = state.region
     try:
-        lat, lon = geocode_place(region)   # ✅ replaced get_lat_lon
+        lat, lon = geocode_place(region)
         if not lat or not lon:
             raise ValueError(f"Could not geocode region: {region}")
 
-        r = requests.post(
-            A_ALERT,   # ✅ use defined A_ALERT constant
-            json={"region": region, "lat": lat, "lon": lon}
-        )
+        r = requests.post(A_ALERT, json={"region": region, "lat": lat, "lon": lon})
         js = r.json()
-        return {"alert_summary": js.get("alert_summary", "No alert data.")}
+
+        return {
+            "alert_summary": js.get("alert_summary", "No alert data."),
+            "alert_level": js.get("alert_level"),
+            "hazards": js.get("hazards"),
+        }
+
     except Exception as e:
         return {"alert_summary": f"⚠️ Alert agent failed: {e}"}
 

@@ -313,3 +313,16 @@
 {"asctime": "2025-10-29 19:41:27,666", "levelname": "INFO", "name": "service", "message": "", "event": "super_analyze_saved", "region": "Jamaica"}
 {"asctime": "2025-10-29 19:47:50,611", "levelname": "INFO", "name": "service", "message": "", "event": "super_analyze_saved", "region": "Bagda"}
 {"asctime": "2025-10-29 20:03:09,684", "levelname": "INFO", "name": "service", "message": "", "event": "super_analyze_saved", "region": "Machilipatnam"}
+{"asctime": "2025-10-31 15:37:20,280", "levelname": "INFO", "name": "service", "message": "", "event": "super_analyze_saved", "region": "Cooch Behar"}
+{"asctime": "2025-10-31 16:21:32,624", "levelname": "INFO", "name": "service", "message": "", "event": "super_analyze_saved", "region": "Panaji"}
+{"asctime": "2025-10-31 16:22:54,093", "levelname": "INFO", "name": "service", "message": "", "event": "super_analyze_saved", "region": "panaji"}
+{"asctime": "2025-10-31 16:24:33,920", "levelname": "INFO", "name": "service", "message": "", "event": "super_analyze_saved", "region": "kavali"}
+{"asctime": "2025-10-31 18:04:35,732", "levelname": "INFO", "name": "service", "message": "", "event": "archive_analyze_saved", "region": "Mangalore"}
+{"asctime": "2025-10-31 18:30:53,858", "levelname": "INFO", "name": "service", "message": "", "event": "super_analyze_saved", "region": "Shillong"}
+{"asctime": "2025-10-31 18:47:18,683", "levelname": "INFO", "name": "service", "message": "", "event": "super_analyze_saved", "region": "Udaipur"}
+{"asctime": "2025-10-31 19:21:03,316", "levelname": "INFO", "name": "service", "message": "", "event": "super_analyze_saved", "region": "Darjeeling"}
+{"asctime": "2025-10-31 19:22:21,591", "levelname": "INFO", "name": "service", "message": "", "event": "super_analyze_saved", "region": "Birbhum"}
+{"asctime": "2025-11-01 10:14:59,375", "levelname": "INFO", "name": "service", "message": "", "event": "super_analyze_saved", "region": "shimla"}
+{"asctime": "2025-11-01 10:33:21,667", "levelname": "INFO", "name": "service", "message": "", "event": "super_analyze_saved", "region": "Delhi"}
+{"asctime": "2025-11-01 10:36:53,227", "levelname": "INFO", "name": "service", "message": "", "event": "super_analyze_saved", "region": "Delhi"}
+{"asctime": "2025-11-01 10:39:27,378", "levelname": "INFO", "name": "service", "message": "", "event": "super_analyze_saved", "region": "Hassan"}
