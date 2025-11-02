@@ -108,16 +108,29 @@ def root():
 # ---------- Middleware: metrics per request ----------
 @app.middleware("http")
 async def metrics_middleware(request: Request, call_next):
-    start = time.perf_counter()
+    """Record Prometheus metrics for every HTTP request."""
+    start_time = time.perf_counter()
+    status_code = 500  # default if something fails early
+
     try:
-        resp: Response = await call_next(request)
-        status = resp.status_code
-        return resp
+        response: Response = await call_next(request)
+        status_code = response.status_code
+        return response
+
     finally:
-        dur = time.perf_counter() - start
+        duration = time.perf_counter() - start_time
         path = request.url.path
-        REQ_COUNT.labels(request.method, path, str(locals().get("status", 500))).inc()
-        REQ_LAT.labels(path).observe(dur)
+        method = request.method
+
+        # ✅ Your actual Prometheus metric objects
+        REQ_COUNT.labels(method, path, str(status_code)).inc()
+        REQ_LAT.labels(path).observe(duration)
+
+        # Optional logging (can keep or remove)
+        logger.info(
+            f"{method} {path} completed with {status_code} in {duration:.3f}s",
+            extra={"path": path, "status": status_code, "duration": duration},
+        )
 
 # ---------- Health ----------
 @app.get("/health")
@@ -295,8 +308,8 @@ def get_live_weather(body: Dict[str, Any]):
         "longitude": lon,
         "hourly": (
             "temperature_2m,relative_humidity_2m,"
-            "precipitation,pressure_msl,cloud_cover,"
-            "wind_speed_10m,apparent_temperature,uv_index"
+            "precipitation,pressure_msl,cloudcover,"
+            "windspeed_10m,apparent_temperature,uv_index"
         ),
         "current_weather": True,
         "timezone": "auto",
