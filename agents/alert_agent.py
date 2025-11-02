@@ -1,7 +1,7 @@
 import requests, os, logging, requests
 from datetime import datetime
 from dotenv import load_dotenv
-from llm_nvidia import chat_text
+from core.llm_nvidia import chat_text
 
 load_dotenv()
 log = logging.getLogger(__name__)
@@ -106,7 +106,7 @@ def run_alert_agent(region: str, lat: float, lon: float):
         f"Humidity: {humidity:.1f} %, Temp: {temp:.1f} °C, Pressure: {pressure:.1f} hPa"
     )
 
-    prompt_path = os.path.join(os.path.dirname(__file__), "alert_prompt.txt")
+    prompt_path = os.path.join(os.path.dirname(__file__), "../prompts/alert_prompt.txt")
     with open(prompt_path, "r", encoding="utf-8") as f:
         system_prompt = f.read()
 

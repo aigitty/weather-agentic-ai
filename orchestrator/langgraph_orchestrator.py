@@ -6,7 +6,6 @@ from langgraph.checkpoint.memory import MemorySaver
 from langgraph.graph import StateGraph, START, END
 from typing_extensions import Annotated
 from operator import or_
-# top of file
 from langgraph.channels import LastValue
 import httpx
 import os
@@ -14,10 +13,8 @@ import time
 import os
 import sys
 import re
-from router_agent import route_question_to_agents
-from service import geocode_place
-
-
+from agents.router_agent import route_question_to_agents
+from core.service import geocode_place
 
 print("🧭 Running orchestrator file from:", os.path.abspath(__file__))
 print("Loaded modules containing 'orchestrator':")
@@ -77,7 +74,7 @@ def post_agent(url: str, payload: dict, timeout: float = 50.0) -> dict:
 
 # ---- Nodes ----
 def node_router(state: OrchestratorState):
-    from router_agent import route_question_to_agents
+    from agents.router_agent import route_question_to_agents
     q = (state.query or "").lower()
 
     # 🔒 Hard override for alert-y queries
@@ -207,11 +204,11 @@ def node_compose(state: OrchestratorState):
 
 def node_reason(state: OrchestratorState):
     """Let the LLM reason about user context (e.g., 'Can I go for a run?')."""
-    from llm_nvidia import chat_text
+    from core.llm_nvidia import chat_text
 
     summary = state.final_message or ""
     query = state.query
-    prompt_path = os.path.join(os.path.dirname(__file__), "reason_prompt.txt")
+    prompt_path = os.path.join(os.path.dirname(__file__), "../prompts/reason_prompt.txt")
     with open(prompt_path, "r", encoding="utf-8") as f:
         SYSTEM_PROMPT = f.read()
 

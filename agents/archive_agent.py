@@ -1,6 +1,6 @@
 import requests
 from datetime import date, timedelta
-from llm_nvidia import chat_text
+from core.llm_nvidia import chat_text
 import logging
 from datetime import datetime
 import os
@@ -48,8 +48,14 @@ def analyze_archive(region: str, lat: float, lon: float):
         logger.exception(f"Archive fetch failed for {region}: {e}")
         return f"⚠️ Unable to retrieve archive data for {region}. Please try again later."
 
-    prompt = open("archive_prompt.txt", encoding="utf-8").read()
-    filled_prompt = prompt.format(region=region, history=data)
+    # Build prompt path relative to this file
+    PROMPT_PATH = os.path.normpath(
+        os.path.join(os.path.dirname(__file__), "..", "prompts", "archive_prompt.txt")
+        )
+    with open(PROMPT_PATH, "r", encoding="utf-8") as f:
+            prompt_template = f.read()
+
+    filled_prompt = prompt_template.format(region=region, history=data)
 
     logger.info(f"🧩 Running Archive Agent for {region}")
     try:

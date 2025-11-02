@@ -326,3 +326,13 @@
 {"asctime": "2025-11-01 10:33:21,667", "levelname": "INFO", "name": "service", "message": "", "event": "super_analyze_saved", "region": "Delhi"}
 {"asctime": "2025-11-01 10:36:53,227", "levelname": "INFO", "name": "service", "message": "", "event": "super_analyze_saved", "region": "Delhi"}
 {"asctime": "2025-11-01 10:39:27,378", "levelname": "INFO", "name": "service", "message": "", "event": "super_analyze_saved", "region": "Hassan"}
+{"asctime": "2025-11-01 12:14:38,933", "levelname": "INFO", "name": "service", "message": "", "event": "super_analyze_saved", "region": "Udupi"}
+{"asctime": "2025-11-01 12:15:35,761", "levelname": "INFO", "name": "service", "message": "", "event": "super_analyze_saved", "region": "Udupi"}
+{"asctime": "2025-11-01 12:17:20,650", "levelname": "INFO", "name": "service", "message": "", "event": "super_analyze_saved", "region": "mangalore"}
+{"asctime": "2025-11-01 15:29:11,775", "levelname": "INFO", "name": "service", "message": "", "event": "super_analyze_saved", "region": "udupi"}
+{"asctime": "2025-11-01 15:36:30,629", "levelname": "INFO", "name": "service", "message": "", "event": "archive_analyze_saved", "region": "Shimla"}
+{"asctime": "2025-11-01 15:43:14,160", "levelname": "INFO", "name": "service", "message": "", "event": "super_analyze_saved", "region": "Ahmedabad"}
+{"asctime": "2025-11-01 15:50:35,467", "levelname": "INFO", "name": "service", "message": "", "event": "super_analyze_saved", "region": "Kavali"}
+{"asctime": "2025-11-02 09:40:57,442", "levelname": "INFO", "name": "service", "message": "", "event": "super_analyze_saved", "region": "Udupi"}
+{"asctime": "2025-11-02 09:49:57,982", "levelname": "INFO", "name": "service", "message": "", "event": "archive_analyze_saved", "region": "Birbhum"}
+{"asctime": "2025-11-02 09:55:31,366", "levelname": "INFO", "name": "service", "message": "", "event": "super_analyze_saved", "region": "ahmedabad"}

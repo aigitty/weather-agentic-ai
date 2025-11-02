@@ -2,7 +2,7 @@ import requests
 import logging
 from datetime import datetime, timedelta, timezone
 import os
-from llm_nvidia import chat_text
+from core.llm_nvidia import chat_text
 import time
 logging.basicConfig(level=logging.INFO)
 
@@ -51,7 +51,7 @@ def fetch_forecast(lat, lon):
         "longitude": lon,
         "daily": (
             "temperature_2m_max,temperature_2m_min,precipitation_sum,"
-            "wind_speed_10m_max,humidity_2m_max,humidity_2m_min,"
+            "wind_speed_10m_max,relative_humidity_2m_max,relative_humidity_2m_min,"  # <- fix names
             "uv_index_max,cloud_cover_mean,apparent_temperature_max,apparent_temperature_min"
         ),
         "forecast_days": 7,
@@ -130,8 +130,11 @@ def analyze_weather(region, lat, lon):
     }
 
     # Step 3: Load prompt template
-    with open("super_prompt.txt", "r", encoding="utf-8") as f:
-        base_prompt = f.read()
+    PROMPT_PATH = os.path.normpath(
+    os.path.join(os.path.dirname(__file__), "..", "prompts", "super_prompt.txt")
+    )
+    with open(PROMPT_PATH, "r", encoding="utf-8") as f:
+        base_prompt  = f.read()
 
     prompt = base_prompt.format(
         region=region,

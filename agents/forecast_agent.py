@@ -2,7 +2,8 @@ import sys
 import requests
 import json
 import logging
-from llm_nvidia import chat_text
+from core.llm_nvidia import chat_text
+import os
 
 # Configure logging
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
@@ -32,11 +33,14 @@ def fetch_forecast(lat: float, lon: float) -> dict:
 
 # --- Step 2: Load forecasting prompt template ---
 def load_prompt(region: str, forecast_json: dict) -> str:
+    PROMPT_PATH = os.path.normpath(
+        os.path.join(os.path.dirname(__file__), "..", "prompts", "forecast_prompt.txt")
+    )
     try:
-        with open("forecast_prompt.txt", "r", encoding="utf-8") as f:
+        with open(PROMPT_PATH, "r", encoding="utf-8") as f:
             template = f.read()
     except FileNotFoundError:
-        raise RuntimeError("⚠️ forecast_prompt.txt missing — please create it in project root")
+        raise RuntimeError(f"⚠️ forecast_prompt.txt missing at {PROMPT_PATH}")
 
     return template.format(region=region, forecast=json.dumps(forecast_json, indent=2))
 

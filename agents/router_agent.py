@@ -1,16 +1,18 @@
 import json
 from typing import Dict
-from llm_nvidia import chat_text
+from core.llm_nvidia import chat_text
 import os
 
-PROMPT_PATH = os.path.join(os.path.dirname(__file__), "router_prompt.txt")
+PROMPT_PATH = os.path.normpath(
+    os.path.join(os.path.dirname(__file__), "..", "prompts", "router_prompt.txt")
+)
 with open(PROMPT_PATH, "r", encoding="utf-8") as f:
-    SYSTEM_PROMPT = f.read()
+    ROUTER_PROMPT  = f.read()
 
 def route_question_to_agents(user_question: str) -> Dict[str, bool]:
     """Ask LLM to select which agents to call. Returns a dict of 3 booleans."""
     # Combine the system and user text into one prompt
-    prompt = f"""{SYSTEM_PROMPT}
+    prompt = f"""{ROUTER_PROMPT }
 
 User question: {user_question}
 Respond strictly with JSON only (no explanations)."""

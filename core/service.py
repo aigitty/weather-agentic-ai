@@ -14,10 +14,10 @@ from fastapi.responses import JSONResponse, PlainTextResponse
 from dotenv import load_dotenv
 from prometheus_client import Counter, Histogram, generate_latest, CONTENT_TYPE_LATEST
 from prometheus_client import Gauge
-from llm_nvidia import chat_text
 from pydantic import BaseModel
-from forecast_agent import forecast_summary
-from alert_agent import run_alert_agent
+from core.llm_nvidia import chat_text
+from agents.forecast_agent import forecast_summary
+from agents.alert_agent import run_alert_agent
 
 
 # ---------- Logging: JSON to file ----------
@@ -363,7 +363,7 @@ def analyze_weather(body: Dict[str, Any]):
     history = get_weather_history({"latitude": lat, "longitude": lon})
 
     # 3️⃣ Load external prompt from file and fill placeholders
-    prompt_path = os.path.join(os.path.dirname(__file__), "prompt.txt")
+    prompt_path = os.path.join(os.path.dirname(__file__), "../prompts/prompt.txt")
     try:
         with open(prompt_path, "r", encoding="utf-8") as f:
             prompt_template = f.read()
@@ -423,7 +423,7 @@ def archive_analyze(body: Dict[str, Any]):
         raise HTTPException(status_code=404, detail=f"Could not geocode region: {region}")
 
     # --- Step 2: Import and run Archive Agent ---
-    from archive_agent import analyze_archive
+    from agents.archive_agent import analyze_archive
     result = analyze_archive(region, lat, lon)
 
     # --- Step 3: Optional DB log ---
@@ -454,7 +454,7 @@ def super_analyze(body: Dict[str, Any]):
         raise HTTPException(status_code=404, detail=f"Could not geocode region: {region}")
 
     # --- Step 2: Run Super Analyzer ---
-    from super_analyzer_agent import analyze_weather
+    from agents.super_analyzer_agent import analyze_weather
     result = analyze_weather(region, lat, lon)
 
     # --- Step 3: Optional DB log (if you want to store summary) ---
@@ -474,7 +474,7 @@ def super_analyze(body: Dict[str, Any]):
 @app.post("/chat")
 def chat_route(payload: ChatReq):
     # import only when endpoint is hit
-    from langgraph_orchestrator import run_query
+    from orchestrator.langgraph_orchestrator import run_query
     st = run_query(payload.query, payload.region)
     return {
         "region": st.region,
